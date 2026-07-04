@@ -206,11 +206,17 @@ class GameServiceTest(unittest.TestCase):
         world = self.query_one(
             "SELECT legend_index, legend_text, clue_count, act_seq FROM world WHERE id = 1"
         )
+        admin = self.query_one(
+            "SELECT story_background, beat_interval_seconds, generation_paused FROM admin_settings WHERE id = 1"
+        )
 
         self.assertEqual(world["legend_index"], 0)
         self.assertIn("钟", world["legend_text"])
         self.assertEqual(world["clue_count"], 0)
         self.assertEqual(world["act_seq"], 0)
+        self.assertEqual(admin["story_background"], "")
+        self.assertEqual(admin["beat_interval_seconds"], 30)
+        self.assertEqual(admin["generation_paused"], 0)
         self.assertEqual(self.query_value(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'oracle_pool'"
         ), None)
@@ -310,6 +316,59 @@ class GameServiceTest(unittest.TestCase):
         self.assertIn(first["charId"], story["acts"][-1]["involved"])
         self.assertIn("legend", llm.contexts[-1]["world"])
         self.assertEqual(len(llm.contexts[-1]["recentActs"]), 2)
+
+    def test_admin_settings_update_pause_generation_and_background_context(self):
+        llm = FakeLlmGateway()
+        game = GameService(self.db_path, llm=llm)
+        game.join({"templateId": game.template()["templateId"], "edits": {"name": "甲"}})
+
+        updated = game.update_admin({
+            "storyBackground": "这是一个糖果工厂会审判影子的荒诞世界。",
+            "beatIntervalSeconds": 12,
+            "generationPaused": True,
+        })
+        paused = game.enqueue_beat(now=100)
+
+        self.assertEqual(updated["storyBackground"], "这是一个糖果工厂会审判影子的荒诞世界。")
+        self.assertEqual(updated["beatIntervalSeconds"], 12)
+        self.assertEqual(updated["generationPaused"], True)
+        self.assertEqual(paused, {"queued": False, "reason": "paused"})
+
+        game.update_admin({"generationPaused": False})
+        queued = game.enqueue_beat(now=101)
+        game.process_next_weave_job()
+
+        self.assertTrue(queued["queued"])
+        self.assertEqual(llm.contexts[-1]["storyBackground"], "这是一个糖果工厂会审判影子的荒诞世界。")
+
+    def test_admin_reset_requires_confirmation_and_clears_story_state(self):
+        self.game.join({"templateId": self.game.template()["templateId"]})
+        self.game.update_admin({
+            "storyBackground": "重置后应该保留的背景",
+            "beatIntervalSeconds": 9,
+            "generationPaused": True,
+        })
+
+        with self.assertRaises(ApiError) as raised:
+            self.game.reset_story({"confirm": "WRONG"})
+
+        self.assertEqual(raised.exception.code, "REJECTED")
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM characters"), 1)
+
+        reset = self.game.reset_story({"confirm": "RESET"})
+
+        self.assertEqual(reset["reset"], True)
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM characters"), 0)
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM acts"), 0)
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM print_queue"), 0)
+        self.assertEqual(self.query_value("SELECT used FROM templates WHERE id = ?", (self.game.template()["templateId"],)), 0)
+        admin = self.game.admin()
+        self.assertEqual(admin["storyBackground"], "重置后应该保留的背景")
+        self.assertEqual(admin["beatIntervalSeconds"], 9)
+        self.assertEqual(admin["generationPaused"], True)
+        self.assertEqual(self.game.story(after=0)["world"]["clueCount"], 0)
+        joined_after_reset = self.game.join({"templateId": self.game.template()["templateId"]})
+        self.assertEqual(joined_after_reset["firstActId"], self.game.story(after=0)["acts"][0]["id"])
 
     def test_leave_card_mail_and_print_contracts_remain_available(self):
         template = self.game.template()
@@ -414,6 +473,29 @@ class HttpContractTest(unittest.TestCase):
         })
         self.assertEqual(status, 404)
         self.assertEqual(rejected["error"]["code"], "NOT_FOUND")
+
+    def test_http_admin_update_and_reset_contract(self):
+        status, admin = self.request("GET", "/api/admin")
+        self.assertEqual(status, 200)
+        self.assertEqual(admin["generationPaused"], False)
+
+        status, updated = self.request("POST", "/api/admin", {
+            "storyBackground": "管理员写下的新背景",
+            "beatIntervalSeconds": 17,
+            "generationPaused": True,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["storyBackground"], "管理员写下的新背景")
+        self.assertEqual(updated["beatIntervalSeconds"], 17)
+        self.assertEqual(updated["generationPaused"], True)
+
+        status, rejected = self.request("POST", "/api/admin/reset", {"confirm": "reset"})
+        self.assertEqual(status, 400)
+        self.assertEqual(rejected["error"]["code"], "REJECTED")
+
+        status, reset = self.request("POST", "/api/admin/reset", {"confirm": "RESET"})
+        self.assertEqual(status, 200)
+        self.assertEqual(reset["reset"], True)
 
 
 class RuntimeTest(unittest.TestCase):

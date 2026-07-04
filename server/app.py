@@ -28,6 +28,9 @@ def create_handler(game):
                 if parsed.path == "/api/template":
                     self._send_json(200, self.service.template())
                     return
+                if parsed.path == "/api/admin":
+                    self._send_json(200, self.service.admin())
+                    return
                 if parsed.path.startswith("/api/me/"):
                     char_id = parsed.path.rsplit("/", 1)[-1]
                     self._send_json(200, self.service.me(char_id))
@@ -59,6 +62,12 @@ def create_handler(game):
                         payload.get("text"),
                     ))
                     return
+                if parsed.path == "/api/admin":
+                    self._send_json(200, self.service.update_admin(payload))
+                    return
+                if parsed.path == "/api/admin/reset":
+                    self._send_json(200, self.service.reset_story(payload))
+                    return
                 raise ApiError("NOT_FOUND", "世界没有这条道路。", status=404)
             except ApiError as error:
                 self._send_json(error.status, error.envelope())
@@ -78,7 +87,7 @@ def create_handler(game):
             return json.loads(raw.decode("utf-8"))
 
         def _enforce_rate_limit(self, path):
-            if path not in {"/api/join", "/api/leave", "/api/mail/reply"}:
+            if path not in {"/api/join", "/api/leave", "/api/mail/reply", "/api/admin", "/api/admin/reset"}:
                 return
             client = self.client_address[0] if self.client_address else "unknown"
             key = f"{client}:{path}"

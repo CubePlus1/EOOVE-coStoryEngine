@@ -142,7 +142,8 @@ select:focus-visible {
 
 .wall-stage,
 .phone-scene,
-.ending-scene {
+.ending-scene,
+.admin-scene {
   position: relative;
   z-index: 2;
 }
@@ -678,6 +679,167 @@ textarea {
   line-height: 1.8;
 }
 
+.admin-scene {
+  display: grid;
+  gap: clamp(16px, 2vw, 24px);
+  max-width: 1180px;
+  min-height: calc(100vh - 68px);
+  margin: 0 auto;
+  padding-top: 64px;
+}
+
+.admin-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 18px;
+}
+
+.admin-header h1 {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: clamp(2rem, 4vw, 4.6rem);
+  line-height: 1.05;
+}
+
+.admin-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  font-weight: 800;
+  background: oklch(0.98 0.024 86 / 0.76);
+}
+
+.admin-status.running {
+  color: oklch(0.34 0.1 156);
+}
+
+.admin-status.paused {
+  color: var(--blood);
+}
+
+.admin-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.admin-metrics article {
+  display: grid;
+  gap: 4px;
+  min-height: 86px;
+  align-content: center;
+  border: 1px solid var(--line);
+  padding: 14px;
+  background: oklch(0.97 0.026 85 / 0.72);
+}
+
+.admin-metrics span {
+  color: var(--blood);
+  font-family: var(--serif);
+  font-size: clamp(1.7rem, 3vw, 2.8rem);
+  line-height: 1;
+}
+
+.admin-metrics small {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+  gap: clamp(14px, 2vw, 24px);
+  align-items: start;
+}
+
+.admin-panel {
+  display: grid;
+  gap: 16px;
+  border: 1px solid var(--line);
+  padding: clamp(16px, 2vw, 24px);
+  background:
+    linear-gradient(135deg, oklch(0.99 0.022 88 / 0.86), oklch(0.9 0.05 78 / 0.82)),
+    var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.admin-panel h2 {
+  margin: 0;
+  color: var(--deep);
+  font-family: var(--serif);
+  font-size: clamp(1.35rem, 2.4vw, 2.2rem);
+}
+
+.admin-panel p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.admin-panel label {
+  display: grid;
+  gap: 8px;
+  color: var(--deep);
+  font-weight: 800;
+}
+
+.admin-panel textarea {
+  min-height: 220px;
+}
+
+.admin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.ghost-action,
+.danger-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  cursor: pointer;
+  padding: 0 16px;
+}
+
+.ghost-action {
+  color: var(--deep);
+  background: oklch(0.98 0.024 86 / 0.5);
+}
+
+.danger-panel {
+  border-color: oklch(0.45 0.17 28 / 0.34);
+  background:
+    linear-gradient(150deg, oklch(0.97 0.026 85 / 0.84), oklch(0.82 0.075 55 / 0.62)),
+    var(--surface);
+}
+
+.danger-action {
+  color: oklch(0.98 0.025 86);
+  background: var(--blood);
+}
+
+.danger-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.admin-notice {
+  min-height: 26px;
+  margin: 0;
+  color: var(--blood);
+  font-family: var(--serif);
+}
+
 @keyframes ribbon-flow {
   to {
     transform: translateX(-50%);
@@ -736,7 +898,8 @@ textarea {
 
   .wall-stage,
   .phone-scene,
-  .ending-scene {
+  .ending-scene,
+  .admin-scene {
     padding-top: 68px;
   }
 
@@ -791,6 +954,16 @@ textarea {
     width: 72px;
     height: 72px;
     font-size: 1.6rem;
+  }
+
+  .admin-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-metrics,
+  .admin-grid {
+    grid-template-columns: 1fr;
   }
 
   .qr-mark {

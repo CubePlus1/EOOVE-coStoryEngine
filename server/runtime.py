@@ -50,8 +50,10 @@ class BackgroundRuntime:
 
     def _beat_loop(self):
         while not self._stop.is_set():
-            self.game.maybe_beat(now=self.now_func(), idle_seconds=self.beat_interval)
-            self._stop.wait(self.beat_interval)
+            admin = self.game.admin()
+            interval = admin["beatIntervalSeconds"]
+            self.game.maybe_beat(now=self.now_func(), idle_seconds=interval)
+            self._stop.wait(interval)
 
     def _print_loop(self):
         while not self._stop.is_set():

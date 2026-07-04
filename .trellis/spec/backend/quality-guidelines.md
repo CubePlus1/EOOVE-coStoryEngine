@@ -25,6 +25,9 @@
   - `GET /api/card/:charId`
   - `POST /api/leave`
   - `POST /api/mail/reply`
+  - `GET /api/admin -> { storyBackground, beatIntervalSeconds, generationPaused, stats }`
+  - `POST /api/admin { storyBackground?, beatIntervalSeconds?, generationPaused? } -> admin state`
+  - `POST /api/admin/reset { confirm: "RESET" } -> admin state with reset: true`
 - Removed API route: `POST /api/act` must return `NOT_FOUND`.
 - Queue workers:
   - `enqueue_beat(now=None) -> dict`
@@ -49,8 +52,11 @@
   - `characters(..., tags_json, last_seen_act, joined_at)`
   - `acts(seq, type, narrative, chronicle, involved_json, personal_json, importance, print_json, created_at)`
   - `weave_queue`
+  - `admin_settings(id, story_background, beat_interval_seconds, generation_paused)`
 - Legacy v1 tables may be archived with `_v1_backup` suffix during initialization; do not silently reuse v1 columns.
 - Clue progression: each story act increments `clue_count`; clue 8 inserts a `twist` act and updates `world.legend_text`; clue 20 inserts a `reveal`, enqueues a reveal ticket, rotates to the next legend, and resets clue count to 0.
+- Admin settings control the live demo: `generation_paused` blocks beat enqueueing, `beat_interval_seconds` controls background beat timing, and `story_background` is injected into the weaver context.
+- Story reset is a dangerous operation and must require exact `confirm: "RESET"`; reset clears story state and queues but preserves admin settings.
 - Queue failure semantics:
   - Printer driver failure leaves `print_queue.status = 'pending'` for retry.
   - Mail transport failure leaves `mail_queue.status = 'pending'` for retry.
@@ -69,6 +75,8 @@
 - Unknown character/email/template -> `NOT_FOUND`.
 - Invalid join payload or edits -> `REJECTED`.
 - Join edit sensitive word or >8 chars -> `{ error: { code: "REJECTED", message: "这个名字被世界吞掉了,换一个吧" } }`.
+- Admin reset without exact `RESET` confirmation -> `REJECTED`.
+- Admin beat interval outside 1..3600 seconds -> `REJECTED`.
 - LLM timeout or malformed weaver output -> deterministic fallback; keep the pipeline unblocked.
 
 ### 5. Good/Base/Bad Cases
@@ -90,6 +98,7 @@
   - story response shape,
   - twist/reveal clue progression,
   - global beat queue and cold character selection,
+  - admin pause/start, beat interval, background injection, and reset confirmation,
   - print/mail failure retry.
 - Async production wrapper tests for behavior that differs from synchronous `GameService`.
 - Demo hardening tests must assert rejected requests do not mutate world state.

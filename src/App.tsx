@@ -7,6 +7,11 @@ import {
   Landmark,
   MessageSquareText,
   MoonStar,
+  Pause,
+  Play,
+  RotateCcw,
+  Save,
+  Settings,
   ScrollText,
   Send,
   ShieldAlert,
@@ -29,16 +34,40 @@ import {
   getPersonalStoryEntries,
 } from './view-model/storyEntries';
 
-type ViewMode = 'phone' | 'wall' | 'card';
+type ViewMode = 'phone' | 'wall' | 'card' | 'admin';
 type PhonePhase = 'gate' | 'join' | 'reveal' | 'world';
 type StoryTab = 'world' | 'mine';
+
+interface AdminState {
+  storyBackground: string;
+  beatIntervalSeconds: number;
+  generationPaused: boolean;
+  stats: {
+    characters: number;
+    acts: number;
+    pendingWeaveJobs: number;
+    pendingPrintJobs: number;
+  };
+}
+
+const emptyAdmin: AdminState = {
+  storyBackground: '',
+  beatIntervalSeconds: 30,
+  generationPaused: false,
+  stats: {
+    characters: 0,
+    acts: 0,
+    pendingWeaveJobs: 0,
+    pendingPrintJobs: 0,
+  },
+};
 
 const currentCharId = 'c_01';
 
 export function App() {
   const [view, setView] = useState<ViewMode>(() => {
     const viewParam = new URLSearchParams(window.location.search).get('view');
-    return viewParam === 'phone' || viewParam === 'card' || viewParam === 'wall' ? viewParam : 'wall';
+    return viewParam === 'phone' || viewParam === 'card' || viewParam === 'wall' || viewParam === 'admin' ? viewParam : 'wall';
   });
   const [story, setStory] = useState<MockStoryState>(() => createMockWorld());
   const [phase, setPhase] = useState<PhonePhase>(() => (localStorage.getItem('world_charId') ? 'world' : 'gate'));
@@ -48,6 +77,13 @@ export function App() {
   const [scope, setScope] = useState<'global' | LocationId>('loc_ruins');
   const [notice, setNotice] = useState('史书仍在翻动, 等待下一笔。');
   const [nodeFlash, setNodeFlash] = useState<Act | null>(null);
+  const [admin, setAdmin] = useState<AdminState>(emptyAdmin);
+  const [adminDraft, setAdminDraft] = useState({
+    storyBackground: '',
+    beatIntervalSeconds: 30,
+    resetConfirm: '',
+  });
+  const [adminNotice, setAdminNotice] = useState('管理后台未连接。');
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -68,6 +104,34 @@ export function App() {
     }, 5200);
     return () => window.clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (view !== 'admin') {
+      return;
+    }
+    let cancelled = false;
+    loadAdmin()
+      .then((nextAdmin) => {
+        if (cancelled) {
+          return;
+        }
+        setAdmin(nextAdmin);
+        setAdminDraft({
+          storyBackground: nextAdmin.storyBackground,
+          beatIntervalSeconds: nextAdmin.beatIntervalSeconds,
+          resetConfirm: '',
+        });
+        setAdminNotice('管理后台已连接。');
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAdminNotice('无法连接后端管理接口。');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [view]);
 
   const me = story.characters.find((character) => character.charId === currentCharId) ?? story.characters[0];
   const myLocation = story.locations.find((location) => location.id === me.location) ?? story.locations[0];
@@ -136,6 +200,10 @@ export function App() {
         <button className={view === 'card' ? 'active' : ''} type="button" onClick={() => switchView('card')}>
           <ScrollText size={17} />
           结局卡
+        </button>
+        <button className={view === 'admin' ? 'active' : ''} type="button" onClick={() => switchView('admin')}>
+          <Settings size={17} />
+          管理
         </button>
       </nav>
 
@@ -327,6 +395,97 @@ export function App() {
             </article>
           </motion.section>
         )}
+
+        {view === 'admin' && (
+          <motion.section key="admin" className="admin-scene" {...pageMotion}>
+            <header className="admin-header">
+              <div>
+                <p className="eyebrow">EOOVE · CONTROL</p>
+                <h1>故事管理后台</h1>
+              </div>
+              <div className={`admin-status ${admin.generationPaused ? 'paused' : 'running'}`}>
+                {admin.generationPaused ? <Pause size={18} /> : <Play size={18} />}
+                <span>{admin.generationPaused ? '生成已暂停' : '正在生成'}</span>
+              </div>
+            </header>
+
+            <section className="admin-metrics" aria-label="后台统计">
+              <article>
+                <span>{admin.stats.characters}</span>
+                <small>角色</small>
+              </article>
+              <article>
+                <span>{admin.stats.acts}</span>
+                <small>幕</small>
+              </article>
+              <article>
+                <span>{admin.stats.pendingWeaveJobs}</span>
+                <small>待编织</small>
+              </article>
+              <article>
+                <span>{admin.stats.pendingPrintJobs}</span>
+                <small>待打印</small>
+              </article>
+            </section>
+
+            <section className="admin-grid">
+              <form className="admin-panel" onSubmit={handleAdminSave}>
+                <div>
+                  <h2>世界参数</h2>
+                  <p>这些设置会影响后端编织上下文和自动事件节拍。</p>
+                </div>
+                <label>
+                  故事背景
+                  <textarea
+                    value={adminDraft.storyBackground}
+                    onChange={(event) => setAdminDraft((draftValue) => ({ ...draftValue, storyBackground: event.target.value }))}
+                    placeholder="例如: 这是一座所有钟表都害怕甜食的荒诞小镇。"
+                  />
+                </label>
+                <label>
+                  事件生成时间（秒）
+                  <input
+                    min={1}
+                    max={3600}
+                    type="number"
+                    value={adminDraft.beatIntervalSeconds}
+                    onChange={(event) => setAdminDraft((draftValue) => ({ ...draftValue, beatIntervalSeconds: Number(event.target.value) }))}
+                  />
+                </label>
+                <div className="admin-actions">
+                  <button className="primary-action" type="submit">
+                    <Save size={17} />
+                    保存设置
+                  </button>
+                  <button className="ghost-action" type="button" onClick={() => setGenerationPaused(!admin.generationPaused)}>
+                    {admin.generationPaused ? <Play size={17} /> : <Pause size={17} />}
+                    {admin.generationPaused ? '开始生成' : '暂停生成'}
+                  </button>
+                </div>
+              </form>
+
+              <section className="admin-panel danger-panel">
+                <div>
+                  <h2>危险操作</h2>
+                  <p>重置会清空当前故事、角色、幕、队列，并把模板卡恢复为未使用。</p>
+                </div>
+                <label>
+                  输入 RESET 确认重置
+                  <input
+                    value={adminDraft.resetConfirm}
+                    onChange={(event) => setAdminDraft((draftValue) => ({ ...draftValue, resetConfirm: event.target.value }))}
+                    placeholder="RESET"
+                  />
+                </label>
+                <button className="danger-action" type="button" onClick={resetStory} disabled={adminDraft.resetConfirm !== 'RESET'}>
+                  <RotateCcw size={17} />
+                  重置故事
+                </button>
+              </section>
+            </section>
+            <p className="admin-notice">{adminNotice}</p>
+          </motion.section>
+        )}
       </AnimatePresence>
 
       <AnimatePresence>
@@ -348,6 +507,93 @@ export function App() {
       </AnimatePresence>
     </main>
   );
+
+  async function handleAdminSave(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    try {
+      const nextAdmin = await saveAdmin({
+        storyBackground: adminDraft.storyBackground,
+        beatIntervalSeconds: adminDraft.beatIntervalSeconds,
+        generationPaused: admin.generationPaused,
+      });
+      setAdmin(nextAdmin);
+      setAdminNotice('设置已保存。');
+    } catch (error) {
+      setAdminNotice(error instanceof Error ? error.message : '设置保存失败。');
+    }
+  }
+
+  async function setGenerationPaused(nextPaused: boolean) {
+    try {
+      const nextAdmin = await saveAdmin({ generationPaused: nextPaused });
+      setAdmin(nextAdmin);
+      setAdminDraft((draftValue) => ({
+        ...draftValue,
+        storyBackground: nextAdmin.storyBackground,
+        beatIntervalSeconds: nextAdmin.beatIntervalSeconds,
+      }));
+      setAdminNotice(nextPaused ? '已暂停自动生成。' : '已开始自动生成。');
+    } catch (error) {
+      setAdminNotice(error instanceof Error ? error.message : '状态切换失败。');
+    }
+  }
+
+  async function resetStory() {
+    try {
+      const nextAdmin = await resetAdminStory(adminDraft.resetConfirm);
+      setAdmin(nextAdmin);
+      setAdminDraft({
+        storyBackground: nextAdmin.storyBackground,
+        beatIntervalSeconds: nextAdmin.beatIntervalSeconds,
+        resetConfirm: '',
+      });
+      setAdminNotice('故事已重置。');
+    } catch (error) {
+      setAdminNotice(error instanceof Error ? error.message : '重置失败。');
+    }
+  }
+}
+
+async function loadAdmin(): Promise<AdminState> {
+  const response = await fetch('/api/admin');
+  return readAdminResponse(response);
+}
+
+async function saveAdmin(payload: Partial<Pick<AdminState, 'storyBackground' | 'beatIntervalSeconds' | 'generationPaused'>>): Promise<AdminState> {
+  const response = await fetch('/api/admin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return readAdminResponse(response);
+}
+
+async function resetAdminStory(confirm: string): Promise<AdminState> {
+  const response = await fetch('/api/admin/reset', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm }),
+  });
+  return readAdminResponse(response);
+}
+
+async function readAdminResponse(response: Response): Promise<AdminState> {
+  const payload = await response.json();
+  if (!response.ok) {
+    const message = payload?.error?.message;
+    throw new Error(typeof message === 'string' ? message : '管理接口请求失败。');
+  }
+  return {
+    storyBackground: String(payload.storyBackground ?? ''),
+    beatIntervalSeconds: Number(payload.beatIntervalSeconds ?? 30),
+    generationPaused: Boolean(payload.generationPaused),
+    stats: {
+      characters: Number(payload.stats?.characters ?? 0),
+      acts: Number(payload.stats?.acts ?? 0),
+      pendingWeaveJobs: Number(payload.stats?.pendingWeaveJobs ?? 0),
+      pendingPrintJobs: Number(payload.stats?.pendingPrintJobs ?? 0),
+    },
+  };
 }
 
 function WallHeader({ story, progress }: { story: MockStoryState; progress: number }) {

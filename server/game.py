@@ -55,6 +55,82 @@ class GameService:
     def close(self):
         self.conn.close()
 
+    def admin(self):
+        with self.lock:
+            settings = self._admin_settings()
+            stats = {
+                "characters": self.conn.execute("SELECT COUNT(*) FROM characters").fetchone()[0],
+                "acts": self.conn.execute("SELECT COUNT(*) FROM acts").fetchone()[0],
+                "pendingWeaveJobs": self.conn.execute(
+                    "SELECT COUNT(*) FROM weave_queue WHERE status = 'pending'"
+                ).fetchone()[0],
+                "pendingPrintJobs": self.conn.execute(
+                    "SELECT COUNT(*) FROM print_queue WHERE status = 'pending'"
+                ).fetchone()[0],
+            }
+            result = self._admin_public(settings)
+            result["stats"] = stats
+            return result
+
+    def update_admin(self, payload):
+        self._require_mapping(payload)
+        with self.lock:
+            current = self._admin_settings()
+            story_background = current["story_background"]
+            beat_interval = current["beat_interval_seconds"]
+            generation_paused = bool(current["generation_paused"])
+
+            if "storyBackground" in payload:
+                story_background = self._bounded_optional_text(payload["storyBackground"], 1200)
+            if "beatIntervalSeconds" in payload:
+                beat_interval = self._coerce_admin_interval(payload["beatIntervalSeconds"])
+            if "generationPaused" in payload:
+                if not isinstance(payload["generationPaused"], bool):
+                    raise ApiError("REJECTED", "暂停状态必须是真或假。")
+                generation_paused = payload["generationPaused"]
+
+            self.conn.execute(
+                """
+                UPDATE admin_settings
+                SET story_background = ?, beat_interval_seconds = ?, generation_paused = ?
+                WHERE id = 1
+                """,
+                (story_background, beat_interval, 1 if generation_paused else 0),
+            )
+            self.conn.commit()
+            return self.admin()
+
+    def reset_story(self, payload):
+        self._require_mapping(payload)
+        if payload.get("confirm") != "RESET":
+            raise ApiError("REJECTED", "重置故事需要输入 RESET。")
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE world
+                SET legend_index = 0, legend_text = ?, clue_count = 0, act_seq = 0
+                WHERE id = 1
+                """,
+                (self.legends[0]["legend"],),
+            )
+            for table in [
+                "characters",
+                "acts",
+                "triples",
+                "weave_queue",
+                "print_queue",
+                "mail_queue",
+                "inputs_log",
+            ]:
+                self.conn.execute(f"DELETE FROM {table}")
+            self.conn.execute("UPDATE templates SET used = 0")
+            self.occupied_characters.clear()
+            self.last_beat_at = 0
+            self.conn.commit()
+            result = self.admin()
+            result["reset"] = True
+            return result
+
     def template(self):
         with self.lock:
             self._seed_templates_if_needed()
@@ -132,6 +208,8 @@ class GameService:
         if now is None:
             now = int(time.time())
         with self.lock:
+            if self._admin_settings()["generation_paused"]:
+                return {"queued": False, "reason": "paused"}
             pending = self.conn.execute(
                 "SELECT COUNT(*) FROM weave_queue WHERE status = 'pending'"
             ).fetchone()[0]
@@ -276,6 +354,10 @@ class GameService:
     def maybe_beat(self, now=None, idle_seconds=25):
         if now is None:
             now = int(time.time())
+        settings = self.admin()
+        if settings["generationPaused"]:
+            return None
+        idle_seconds = settings["beatIntervalSeconds"] if idle_seconds is None else idle_seconds
         with self.lock:
             if self.last_beat_at and now - self.last_beat_at < idle_seconds:
                 return None
@@ -561,8 +643,10 @@ class GameService:
         recent_rows = self.conn.execute(
             "SELECT narrative, chronicle FROM acts ORDER BY id DESC LIMIT 5"
         ).fetchall()
+        settings = self._admin_settings()
         return {
             "tone": "无厘头、无压力,但必须围绕当前传说推进发现/争论/搅局。",
+            "storyBackground": settings["story_background"],
             "world": self._world_public(world),
             "input": {"text": action_text, "kind": type_},
             "characters": [
@@ -755,6 +839,26 @@ class GameService:
     def _world(self):
         return self.conn.execute("SELECT * FROM world WHERE id = 1").fetchone()
 
+    def _admin_settings(self):
+        row = self.conn.execute("SELECT * FROM admin_settings WHERE id = 1").fetchone()
+        if row is not None:
+            return row
+        self.conn.execute(
+            """
+            INSERT INTO admin_settings
+            (id, story_background, beat_interval_seconds, generation_paused)
+            VALUES (1, '', 30, 0)
+            """
+        )
+        return self.conn.execute("SELECT * FROM admin_settings WHERE id = 1").fetchone()
+
+    def _admin_public(self, row):
+        return {
+            "storyBackground": row["story_background"],
+            "beatIntervalSeconds": row["beat_interval_seconds"],
+            "generationPaused": bool(row["generation_paused"]),
+        }
+
     def _world_public(self, world):
         return {
             "legend": world["legend_text"],
@@ -843,6 +947,22 @@ class GameService:
             compact = re.sub(r"\s+", "", value)
             if any(word in compact for word in SENSITIVE_WORDS):
                 raise ApiError("REJECTED", JOIN_REJECTION_MESSAGE)
+
+    def _bounded_optional_text(self, value, max_len):
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ApiError("REJECTED", "故事背景必须是文字。")
+        return self._limit(value.strip(), max_len)
+
+    def _coerce_admin_interval(self, value):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            raise ApiError("REJECTED", "事件生成时间必须是数字。")
+        if parsed < 1 or parsed > 3600:
+            raise ApiError("REJECTED", "事件生成时间必须在 1 到 3600 秒之间。")
+        return parsed
 
     def _validate_text(self, value, label):
         if not isinstance(value, str) or not value.strip():
@@ -1063,6 +1183,15 @@ class AsyncGameService:
 
     def template(self):
         return self.game.template()
+
+    def admin(self):
+        return self.game.admin()
+
+    def update_admin(self, payload):
+        return self.game.update_admin(payload)
+
+    def reset_story(self, payload):
+        return self.game.reset_story(payload)
 
     def join(self, payload):
         return self.game.join(payload)

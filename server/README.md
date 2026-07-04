@@ -45,5 +45,10 @@ The implemented JSON routes match the v2 open-world backend contract:
 - `GET /api/me/:charId`
 - `GET /api/card/:charId`
 - `POST /api/mail/reply`
+- `GET /api/admin`
+- `POST /api/admin`
+- `POST /api/admin/reset`
 
 `POST /api/act` is intentionally removed in v2. Real LLM, mail, and printer integrations are represented by deterministic fallbacks and persisted queues.
+
+The admin routes power the demo control panel. Story reset requires `confirm: "RESET"` and clears story state while preserving admin settings.

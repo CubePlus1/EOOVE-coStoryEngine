@@ -11,6 +11,13 @@ CREATE TABLE IF NOT EXISTS world (
   act_seq INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS admin_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  story_background TEXT NOT NULL DEFAULT '',
+  beat_interval_seconds INTEGER NOT NULL DEFAULT 30,
+  generation_paused INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS templates (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -109,6 +116,13 @@ def initialize(conn, initial_legend):
         VALUES (1, 0, ?, 0, 0)
         """,
         (initial_legend,),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO admin_settings
+        (id, story_background, beat_interval_seconds, generation_paused)
+        VALUES (1, '', 30, 0)
+        """
     )
     conn.commit()
 
