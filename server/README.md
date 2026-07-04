@@ -143,7 +143,8 @@ Response:
     "title": "给猫做相亲App Demo",
     "summary": "泡面独角兽 做出的可演示原型: 给猫做相亲App",
     "version": 2,
-    "url": "/api/artifact/1"
+    "url": "/artifacts/idea-1.html",
+    "apiUrl": "/api/artifact/1"
   },
   "gossip": ["泡面角有人提到了你的idea: 给猫做相亲App"],
   "review": null,
@@ -154,16 +155,26 @@ Response:
 Idea status values include `pooled`, `developing`, `pivoted`, `presented`,
 `awarded`, and `carried_over`.
 
-### Idea Demo Page
+### Idea Progress Page
 
 ```http
 GET /idea/1
 ```
 
-This backend-rendered HTML page is the URL encoded in receipt QR codes. Before
-the project is complete it shows the idea status, team, progress bar, A2A task
-movement, commits, and the current temporary artifact link if one exists. Once
-progress reaches 100, the same route returns the final self-contained HTML demo.
+This backend-rendered HTML page is the URL encoded in receipt QR codes. It shows
+the idea status, team, progress bar, A2A task movement, commits, and a link to
+the separate AI-generated frontend artifact.
+
+### Visual Artifact Page
+
+```http
+GET /artifacts/idea-1.html
+```
+
+This is the frontend HTML produced for the submitted idea. It is a standalone
+HTML demo served by the backend without Node. Before a team has produced the
+first artifact it shows a lightweight waiting page; after the first project
+tick it returns the current generated demo HTML.
 
 Receipt and certificate QR codes use:
 
@@ -209,7 +220,12 @@ Response:
       "currentForm": "给猫做相亲App",
       "progress": 18,
       "currentBug": "...",
-      "artifact": {"artifactId": 1, "type": "html", "url": "/api/artifact/1"}
+      "artifact": {
+        "artifactId": 1,
+        "type": "html",
+        "url": "/artifacts/idea-1.html",
+        "apiUrl": "/api/artifact/1"
+      }
     }
   ],
   "events": [
@@ -264,7 +280,8 @@ Response:
     "title": "给猫做相亲App Demo",
     "summary": "泡面独角兽 做出的可演示原型: 给猫做相亲App",
     "version": 2,
-    "url": "/api/artifact/1"
+    "url": "/artifacts/idea-1.html",
+    "apiUrl": "/api/artifact/1"
   }
 }
 ```

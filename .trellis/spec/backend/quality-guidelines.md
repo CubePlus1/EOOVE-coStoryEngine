@@ -33,9 +33,10 @@
   - `GET /api/world?after=<eventId> -> { edition, agents, conversations, projects, events }`
   - `GET /api/project/:id -> { projectId, ideaId, receiptNo, teamName, ideaText, currentForm, progress, currentBug, tasks, commits, artifact }`
   - `GET /api/artifact/:id -> { artifactId, ideaId, version, type, title, summary, contentType, body }`
-  - `GET /idea/:id -> text/html`; before completion it renders a
-    backend-owned progress page with A2A task/commit movement, after completion
-    it renders the final artifact HTML.
+  - `GET /idea/:id -> text/html`; backend-owned progress page with A2A
+    task/commit movement and a link to the separate visual artifact.
+  - `GET /artifacts/idea-:id.html -> text/html`; AI-generated frontend demo
+    HTML for the idea, or a waiting page before the first artifact exists.
   - `GET /api/agent/:id -> { card, intent, memories }`
   - `POST /api/host { action: "start"|"skip_phase"|"finale", phase? } -> { edition }`
   - `GET /api/print/pending?limit=<n> -> [{ ticketId, kind, payload }]`
@@ -120,6 +121,8 @@
   - `python3 -m server.app` serves `/api/*` routes first.
   - `GET /idea/:id` is served by the backend before SPA fallback so printed QR
     codes work without Node or a frontend build.
+  - `GET /artifacts/idea-:id.html` is served by the backend before SPA fallback
+    as the standalone visual HTML produced for the idea.
   - Non-API `GET` requests are served from `EOOVE_STATIC_ROOT` (default `dist`).
   - Unknown non-API routes without a file extension fall back to `index.html`
     for the SPA.

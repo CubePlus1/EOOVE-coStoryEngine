@@ -60,6 +60,10 @@ def create_handler(game, static_root=None):
                     idea_id = parsed.path.rsplit("/", 1)[-1]
                     self._send_html(200, self.service.idea_page(idea_id))
                     return
+                if parsed.path.startswith("/artifacts/idea-") and parsed.path.endswith(".html"):
+                    idea_id = parsed.path.rsplit("idea-", 1)[-1].removesuffix(".html")
+                    self._send_html(200, self.service.visual_artifact_page(idea_id))
+                    return
                 if self.static_root is not None:
                     self._send_static(parsed.path)
                     return

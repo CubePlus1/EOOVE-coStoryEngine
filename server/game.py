@@ -192,12 +192,24 @@ class GameService:
                 "SELECT * FROM artifacts WHERE idea_id = ? ORDER BY version DESC LIMIT 1",
                 (idea["id"],),
             ).fetchone()
-            if idea["progress"] >= 100 and artifact is not None:
-                return {"contentType": artifact["content_type"], "body": artifact["body"]}
             return {
                 "contentType": "text/html; charset=utf-8",
                 "body": self._idea_progress_html(idea, artifact),
             }
+
+    def visual_artifact_page(self, idea_id):
+        with self.lock:
+            idea = self._idea_row(idea_id)
+            artifact = self.conn.execute(
+                "SELECT * FROM artifacts WHERE idea_id = ? ORDER BY version DESC LIMIT 1",
+                (idea["id"],),
+            ).fetchone()
+            if artifact is None:
+                return {
+                    "contentType": "text/html; charset=utf-8",
+                    "body": self._waiting_artifact_html(idea),
+                }
+            return {"contentType": artifact["content_type"], "body": artifact["body"]}
 
     def tick(self, now=None):
         if now is None:
@@ -915,7 +927,8 @@ class GameService:
             "title": row["title"],
             "summary": row["summary"],
             "version": row["version"],
-            "url": f"/api/artifact/{row['id']}",
+            "url": self._visual_artifact_url(row["idea_id"]),
+            "apiUrl": f"/api/artifact/{row['id']}",
         }
 
     def _tasks_for_idea(self, idea_id):
@@ -1034,9 +1047,9 @@ class GameService:
         ) or "<li>还没有提交记录。</li>"
         artifact_url = html.escape(self._artifact_summary(artifact)["url"]) if artifact else ""
         artifact_note = (
-            f"<p class=\"meta\">当前临时产物: <code>{artifact_url}</code></p>"
+            f"<p class=\"meta\">AI 前端可视化: <a href=\"{artifact_url}\">{artifact_url}</a></p>"
             if artifact_url else
-            "<p class=\"meta\">最终 HTML 会在进度完成后出现在本页。</p>"
+            f"<p class=\"meta\">AI 前端可视化生成中: <code>{html.escape(self._visual_artifact_url(idea['id']))}</code></p>"
         )
         return f"""<!doctype html>
 <html lang="zh-CN">
@@ -1085,9 +1098,40 @@ class GameService:
 </body>
 </html>"""
 
+    def _waiting_artifact_html(self, idea):
+        safe_idea = html.escape(idea["text"])
+        safe_receipt = html.escape(idea["receipt_no"])
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="5">
+  <title>{safe_idea} - AI 前端生成中</title>
+  <style>
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f6f8fb; color: #172033; }}
+    main {{ max-width: 760px; margin: 0 auto; padding: 32px 20px; }}
+    section {{ background: white; border: 1px solid #d9e0ea; border-radius: 8px; padding: 20px; }}
+    .meta {{ color: #5d6b82; font-size: 14px; }}
+  </style>
+</head>
+<body>
+  <main data-idea-id="{idea['id']}" data-receipt-no="{safe_receipt}">
+    <section>
+      <p class="meta">收据 {safe_receipt}</p>
+      <h1>{safe_idea}</h1>
+      <p>AI 队伍正在认领这个 idea。生成第一个前端可视化 HTML 后，本页会自动切换成 demo。</p>
+    </section>
+  </main>
+</body>
+</html>"""
+
     def _tracking_url(self, idea_id, receipt_no=None):
         public_base = get_env("EOOVE_PUBLIC_BASE_URL", "https://eoove.tianmiao.fun").rstrip("/")
         return f"{public_base}/idea/{idea_id}"
+
+    def _visual_artifact_url(self, idea_id):
+        return f"/artifacts/idea-{idea_id}.html"
 
     def _idea_row(self, idea_id):
         row = self.conn.execute("SELECT * FROM ideas WHERE id = ?", (idea_id,)).fetchone()
@@ -1283,6 +1327,9 @@ class AsyncGameService:
 
     def idea_page(self, idea_id):
         return self.game.idea_page(idea_id)
+
+    def visual_artifact_page(self, idea_id):
+        return self.game.visual_artifact_page(idea_id)
 
     def tick(self, now=None):
         return self.game.tick(now=now)

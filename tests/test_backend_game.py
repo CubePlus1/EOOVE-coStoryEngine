@@ -231,7 +231,7 @@ class GameServiceTest(unittest.TestCase):
         self.assertEqual(payload["qrUrl"], f"https://eoove.tianmiao.fun/idea/{result['ideaId']}")
         self.assertEqual(payload["trackingId"], result["receiptNo"])
 
-    def test_idea_page_shows_progress_then_final_artifact(self):
+    def test_idea_page_links_to_separate_visual_artifact_page(self):
         idea = self.game.submit_idea({"text": "给猫做相亲App"})
 
         progress_page = self.game.idea_page(idea["ideaId"])
@@ -240,17 +240,21 @@ class GameServiceTest(unittest.TestCase):
         self.assertIn("给猫做相亲App", progress_page["body"])
         self.assertIn("项目进度", progress_page["body"])
         self.assertIn("0%", progress_page["body"])
+        self.assertNotIn("data-project-id", progress_page["body"])
 
-        for offset in range(20):
-            self.game.tick(now=100 + offset)
+        self.game.tick(now=100)
 
-        final_page = self.game.idea_page(idea["ideaId"])
+        updated_progress_page = self.game.idea_page(idea["ideaId"])
+        visual_page = self.game.visual_artifact_page(idea["ideaId"])
 
-        self.assertIn("text/html", final_page["contentType"])
-        self.assertIn("给猫做相亲App", final_page["body"])
-        self.assertIn("data-project-id", final_page["body"])
-        self.assertIn("<button", final_page["body"])
-        self.assertNotIn("项目进度", final_page["body"])
+        self.assertIn("项目进度", updated_progress_page["body"])
+        self.assertIn("/artifacts/idea-1.html", updated_progress_page["body"])
+        self.assertNotIn("data-project-id", updated_progress_page["body"])
+        self.assertIn("text/html", visual_page["contentType"])
+        self.assertIn("给猫做相亲App", visual_page["body"])
+        self.assertIn("data-project-id", visual_page["body"])
+        self.assertIn("<button", visual_page["body"])
+        self.assertNotIn("项目进度", visual_page["body"])
 
     def test_finished_project_does_not_keep_releasing_artifacts(self):
         idea = self.game.submit_idea({"text": "给猫做相亲App"})
@@ -305,7 +309,8 @@ class GameServiceTest(unittest.TestCase):
         artifact = self.game.artifact(project["artifact"]["artifactId"])
 
         self.assertEqual(tracked["artifact"]["type"], "html")
-        self.assertIn("/api/artifact/", tracked["artifact"]["url"])
+        self.assertEqual(tracked["artifact"]["url"], f"/artifacts/idea-{idea['ideaId']}.html")
+        self.assertIn("/api/artifact/", tracked["artifact"]["apiUrl"])
         self.assertEqual(project["ideaId"], idea["ideaId"])
         self.assertEqual(project["receiptNo"], idea["receiptNo"])
         self.assertGreaterEqual(len(project["tasks"]), 3)
@@ -489,16 +494,22 @@ class HttpContractTest(unittest.TestCase):
         status, project = self.request("GET", f"/api/project/{world['projects'][0]['projectId']}")
         self.assertEqual(status, 200)
         self.assertGreaterEqual(len(project["tasks"]), 3)
-        self.assertTrue(project["artifact"]["url"].startswith("/api/artifact/"))
+        self.assertEqual(project["artifact"]["url"], f"/artifacts/idea-{idea['ideaId']}.html")
+        self.assertTrue(project["artifact"]["apiUrl"].startswith("/api/artifact/"))
 
-        status, artifact = self.request("GET", project["artifact"]["url"])
+        status, artifact = self.request("GET", project["artifact"]["apiUrl"])
         self.assertEqual(status, 200)
         self.assertIn("text/html", artifact["contentType"])
         self.assertIn("给猫做相亲App", artifact["body"])
 
-        for offset in range(20):
-            self.game.tick(now=200 + offset)
         status, content_type, body = self.request_raw("GET", f"/idea/{idea['ideaId']}")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", content_type)
+        self.assertIn("项目进度", body)
+        self.assertIn(f"/artifacts/idea-{idea['ideaId']}.html", body)
+        self.assertNotIn("data-project-id", body)
+
+        status, content_type, body = self.request_raw("GET", f"/artifacts/idea-{idea['ideaId']}.html")
         self.assertEqual(status, 200)
         self.assertIn("text/html", content_type)
         self.assertIn("data-project-id", body)

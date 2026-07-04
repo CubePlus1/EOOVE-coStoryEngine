@@ -57,6 +57,7 @@ def main():
         print(f"[idea] accepted ideaId={idea_id} receiptNo={receipt_no}")
 
     print(f"[page] local={base}/idea/{idea_id}")
+    print(f"[demo] visual={base}/artifacts/idea-{idea_id}.html")
     print(f"[qr] print={public_base}/idea/{idea_id}")
     print(f"[watch] base={base} ideaId={idea_id} receiptNo={receipt_no}")
     print("[watch] Ctrl-C to stop\n")
@@ -86,7 +87,7 @@ def main():
                     f"progress={tracked.get('progress')} bug={tracked.get('currentBug')}"
                 )
                 if int(tracked.get("progress") or 0) >= 100:
-                    print(f"[page] final artifact is now visible at {base}/idea/{idea_id}")
+                    print(f"[demo] final artifact is now visible at {base}/artifacts/idea-{idea_id}.html")
                 if tracked.get("gossip"):
                     print(f"[gossip] {tracked['gossip'][0]}")
 
