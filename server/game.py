@@ -48,7 +48,6 @@ class GameService:
         self.llm = llm if llm is not None else HttpJsonLlmGateway()
         self.mail_transport = mail_transport if mail_transport is not None else SmtpMailTransport()
         self.printer_driver = printer_driver if printer_driver is not None else CommandPrinterDriver()
-        self.print_token = print_token if print_token is not None else get_env("EOOVE_PRINT_TOKEN", "")
         self.lock = threading.RLock()
         with self.lock:
             self._seed_templates_if_needed()
@@ -290,7 +289,6 @@ class GameService:
             return {"cardUrl": f"/card/{char['id']}"}
 
     def print_pending(self, token=None, limit=5):
-        self._require_print_token(token)
         limit = max(1, min(self._coerce_non_negative_int(limit) or 5, 20))
         with self.lock:
             rows = self.conn.execute(
@@ -311,7 +309,6 @@ class GameService:
             ]
 
     def print_ack(self, payload, token=None):
-        self._require_print_token(token)
         self._require_mapping(payload)
         ticket_ids = payload.get("ticketIds")
         if not isinstance(ticket_ids, list):
@@ -332,7 +329,6 @@ class GameService:
             return {"acked": acked}
 
     def trigger_finale(self, token=None):
-        self._require_print_token(token)
         with self.lock:
             world = self._world()
             if world["phase"] != "finale":
@@ -874,10 +870,6 @@ class GameService:
         ).fetchall()
         for row in rows:
             self.conn.execute("UPDATE print_queue SET status = 'dropped' WHERE id = ?", (row["id"],))
-
-    def _require_print_token(self, token):
-        if self.print_token and token != self.print_token:
-            raise ApiError("REJECTED", "打印令牌不正确。", status=403)
 
     def _insert_mail(self, char_id, email, kind, reason, now):
         in_world_reason = f"{reason}\n\n直接回复这封邮件,你的话将进入维修区。"

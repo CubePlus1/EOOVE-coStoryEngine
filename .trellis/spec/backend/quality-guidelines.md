@@ -29,9 +29,9 @@
   - `GET /api/admin -> { storyBackground, beatIntervalSeconds, generationPaused, stats }`
   - `POST /api/admin { storyBackground?, beatIntervalSeconds?, generationPaused? } -> admin state`
   - `POST /api/admin/reset { confirm: "RESET" } -> admin state with reset: true`
-  - `GET /api/print/pending?limit=5` with `X-Print-Token`
-  - `POST /api/print/ack { ticketIds: [] }` with `X-Print-Token`
-  - `POST /api/finale` with `X-Print-Token`
+  - `GET /api/print/pending?limit=5`
+  - `POST /api/print/ack { ticketIds: [] }`
+  - `POST /api/finale`
 - Removed API route: `POST /api/act` must return `NOT_FOUND`.
 - Queue workers:
   - `process_next_print_job() -> dict | None`
@@ -56,7 +56,7 @@
   - `rules(story_id, text, created_at)`
   - `admin_settings(id, story_background, beat_interval_seconds, generation_paused)`
 - Legacy v1 tables may be archived with `_v1_backup` suffix during initialization; do not silently reuse v1 columns.
-- Print proxy is pull-based: cloud never pushes to local printers. `X-Print-Token` gates pending/ack/finale endpoints; ack is idempotent. Pending queue preserves `charcard`, `report`, and `finale`; when backlog exceeds 20, drop `report` first.
+- Print proxy is pull-based: cloud never pushes to local printers. Pending/ack/finale endpoints do not require authentication; ack is idempotent. Pending queue preserves `charcard`, `report`, and `finale`; when backlog exceeds 20, drop `report` first.
 - Admin settings control the live demo: `generation_paused` is retained for admin pause state, `beat_interval_seconds` controls background runtime timing, and `story_background` is injected into the weaver context.
 - Story reset is a dangerous operation and must require exact `confirm: "RESET"`; reset clears story state and queues but preserves admin settings.
 - Queue failure semantics:
@@ -108,7 +108,7 @@
   - local join edit rejection with no mutation,
   - story response shape,
   - batch gathering, timeout AI fill, full-story weaving, rule ledger,
-  - print proxy pending/ack token enforcement,
+  - print proxy pending/ack without authentication,
   - admin pause/start, beat interval, background injection, and reset confirmation,
   - print/mail failure retry.
 - Async production wrapper tests for behavior that differs from synchronous `GameService`.

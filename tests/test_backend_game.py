@@ -263,21 +263,18 @@ class GameServiceTest(unittest.TestCase):
         self.assertEqual(len(incremental["rules"]), 1)
         self.assertNotIn("acts", incremental)
 
-    def test_print_proxy_pending_and_ack_require_token(self):
-        game = GameService(self.db_path, llm=self.llm, print_token="secret")
+    def test_print_proxy_pending_and_ack_do_not_require_token(self):
+        game = GameService(self.db_path, llm=self.llm)
         game.join({"templateId": game.template()["templateId"]})
 
-        with self.assertRaises(ApiError):
-            game.print_pending(token="wrong")
-
-        pending = game.print_pending(token="secret", limit=5)
+        pending = game.print_pending(limit=5)
         self.assertEqual(pending[0]["kind"], "charcard")
-        acked = game.print_ack({"ticketIds": [pending[0]["ticketId"]]}, token="secret")
+        acked = game.print_ack({"ticketIds": [pending[0]["ticketId"]]})
         self.assertEqual(acked, {"acked": 1})
-        self.assertEqual(game.print_pending(token="secret"), [])
+        self.assertEqual(game.print_pending(), [])
 
     def test_trigger_finale_creates_finale_story_and_ticket(self):
-        self.game.trigger_finale(token="")
+        self.game.trigger_finale()
 
         story = self.game.story(after=0)
         self.assertEqual(story["world"]["phase"], "finale")
@@ -320,7 +317,7 @@ class HttpContractTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / "game.sqlite")
-        self.game = GameService(self.db_path, print_token="secret")
+        self.game = GameService(self.db_path)
         handler = create_handler(self.game)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -358,15 +355,15 @@ class HttpContractTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(batch["status"], "gathering")
 
-        status, pending = self.request("GET", "/api/print/pending?limit=5", headers={"X-Print-Token": "secret"})
+        status, pending = self.request("GET", "/api/print/pending?limit=5")
         self.assertEqual(status, 200)
         self.assertEqual(pending[0]["kind"], "charcard")
 
-        status, acked = self.request("POST", "/api/print/ack", {"ticketIds": [pending[0]["ticketId"]]}, headers={"X-Print-Token": "secret"})
+        status, acked = self.request("POST", "/api/print/ack", {"ticketIds": [pending[0]["ticketId"]]})
         self.assertEqual(status, 200)
         self.assertEqual(acked["acked"], 1)
 
-        status, finale = self.request("POST", "/api/finale", {}, headers={"X-Print-Token": "secret"})
+        status, finale = self.request("POST", "/api/finale", {})
         self.assertEqual(status, 200)
         self.assertEqual(finale["world"]["phase"], "finale")
 
@@ -374,11 +371,13 @@ class HttpContractTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(set(story.keys()), {"world", "rules", "stories"})
 
-    def test_print_proxy_rejects_bad_token(self):
-        status, rejected = self.request("GET", "/api/print/pending", headers={"X-Print-Token": "bad"})
+    def test_print_proxy_ignores_bad_token(self):
+        self.game.join({"templateId": self.game.template()["templateId"]})
 
-        self.assertEqual(status, 403)
-        self.assertEqual(rejected["error"]["code"], "REJECTED")
+        status, pending = self.request("GET", "/api/print/pending", headers={"X-Print-Token": "bad"})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(pending[0]["kind"], "charcard")
 
 
 class StaticFileTest(unittest.TestCase):

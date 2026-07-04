@@ -37,10 +37,7 @@ def create_handler(game, static_root=None):
                 if parsed.path == "/api/print/pending":
                     query = parse_qs(parsed.query)
                     limit = query.get("limit", ["5"])[0]
-                    self._send_json(200, self.service.print_pending(
-                        token=self.headers.get("X-Print-Token"),
-                        limit=limit,
-                    ))
+                    self._send_json(200, self.service.print_pending(limit=limit))
                     return
                 if parsed.path == "/api/template":
                     self._send_json(200, self.service.template())
@@ -91,15 +88,10 @@ def create_handler(game, static_root=None):
                     self._send_json(200, self.service.reset_story(payload))
                     return
                 if parsed.path == "/api/print/ack":
-                    self._send_json(200, self.service.print_ack(
-                        payload,
-                        token=self.headers.get("X-Print-Token"),
-                    ))
+                    self._send_json(200, self.service.print_ack(payload))
                     return
                 if parsed.path == "/api/finale":
-                    self._send_json(200, self.service.trigger_finale(
-                        token=self.headers.get("X-Print-Token"),
-                    ))
+                    self._send_json(200, self.service.trigger_finale())
                     return
                 raise ApiError("NOT_FOUND", "世界没有这条道路。", status=404)
             except ApiError as error:
