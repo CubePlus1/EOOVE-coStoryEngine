@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .game import ApiError, AsyncGameService, GameService
 from .rate_limit import RateLimiter
-from .runtime import BackgroundRuntime, LocationWorkerRuntime
+from .runtime import BackgroundRuntime, WeaveWorkerRuntime
 
 
 def create_handler(game):
@@ -23,6 +23,9 @@ def create_handler(game):
                     query = parse_qs(parsed.query)
                     after = query.get("after", ["0"])[0]
                     self._send_json(200, self.service.story(after=after))
+                    return
+                if parsed.path == "/api/template":
+                    self._send_json(200, self.service.template())
                     return
                 if parsed.path.startswith("/api/me/"):
                     char_id = parsed.path.rsplit("/", 1)[-1]
@@ -45,9 +48,6 @@ def create_handler(game):
                 payload = self._read_json()
                 if parsed.path == "/api/join":
                     self._send_json(200, self.service.join(payload))
-                    return
-                if parsed.path == "/api/act":
-                    self._send_json(200, self.service.act(payload))
                     return
                 if parsed.path == "/api/leave":
                     self._send_json(200, self.service.leave(payload))
@@ -77,7 +77,7 @@ def create_handler(game):
             return json.loads(raw.decode("utf-8"))
 
         def _enforce_rate_limit(self, path):
-            if path not in {"/api/join", "/api/act", "/api/leave", "/api/mail/reply"}:
+            if path not in {"/api/join", "/api/leave", "/api/mail/reply"}:
                 return
             client = self.client_address[0] if self.client_address else "unknown"
             key = f"{client}:{path}"
@@ -109,17 +109,16 @@ def create_handler(game):
 def run(host="127.0.0.1", port=8000, db_path="server/db.sqlite"):
     game = GameService(db_path)
     background_runtime = BackgroundRuntime(game)
-    location_runtime = LocationWorkerRuntime(game)
-    service = AsyncGameService(game, location_runtime)
-    location_runtime.game = service
+    weave_runtime = WeaveWorkerRuntime(game)
+    service = AsyncGameService(game, weave_runtime)
     server = ThreadingHTTPServer((host, port), create_handler(service))
     background_runtime.start()
-    location_runtime.start()
+    weave_runtime.start()
     try:
         server.serve_forever()
     finally:
         background_runtime.stop(timeout=2)
-        location_runtime.stop(timeout=2)
+        weave_runtime.stop(timeout=2)
         game.close()
         server.server_close()
 

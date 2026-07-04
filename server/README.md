@@ -1,6 +1,6 @@
 # EOOVE Backend
 
-Dependency-free Python backend for the hackathon text adventure game.
+Dependency-free Python backend for the hackathon open-world text adventure game.
 
 ## Run
 
@@ -18,13 +18,14 @@ python3 -m unittest tests/test_backend_game.py
 
 ## API
 
-The implemented JSON routes match `backend-design.md`:
+The implemented JSON routes match the v2 open-world backend contract:
 
+- `GET /api/template`
 - `POST /api/join`
-- `POST /api/act`
 - `POST /api/leave`
 - `GET /api/story?after=<actId>`
 - `GET /api/me/:charId`
 - `GET /api/card/:charId`
+- `POST /api/mail/reply`
 
-Real LLM, mail, and printer integrations are represented by deterministic fallbacks and persisted queues.
+`POST /api/act` is intentionally removed in v2. Real LLM, mail, and printer integrations are represented by deterministic fallbacks and persisted queues.

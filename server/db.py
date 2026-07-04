@@ -5,49 +5,44 @@ from pathlib import Path
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS world (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  cycle INTEGER NOT NULL DEFAULT 1,
-  round INTEGER NOT NULL DEFAULT 0,
-  hope INTEGER NOT NULL DEFAULT 40,
-  status TEXT NOT NULL DEFAULT 'running'
+  legend_index INTEGER NOT NULL DEFAULT 0,
+  legend_text TEXT NOT NULL,
+  clue_count INTEGER NOT NULL DEFAULT 0,
+  act_seq INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS templates (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  tags_json TEXT NOT NULL,
+  used INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS characters (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   profile TEXT NOT NULL,
+  tags_json TEXT NOT NULL,
   type TEXT NOT NULL,
   status TEXT NOT NULL,
-  location TEXT NOT NULL,
   email TEXT,
   ending TEXT,
-  echo TEXT,
-  cycle_joined INTEGER NOT NULL
+  last_seen_act INTEGER NOT NULL DEFAULT 0,
+  joined_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS acts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  cycle INTEGER NOT NULL,
-  round INTEGER NOT NULL,
-  location TEXT NOT NULL,
+  seq INTEGER NOT NULL,
   type TEXT NOT NULL,
   narrative TEXT NOT NULL,
   chronicle TEXT,
-  directive_json TEXT,
   involved_json TEXT NOT NULL,
   personal_json TEXT,
   importance INTEGER NOT NULL,
-  hope_delta INTEGER NOT NULL,
-  oracle_applied TEXT,
+  print_json TEXT,
   created_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS oracle_pool (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  char_id TEXT NOT NULL,
-  scope TEXT NOT NULL,
-  text TEXT NOT NULL,
-  round_submitted INTEGER NOT NULL,
-  status TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS triples (
@@ -55,8 +50,18 @@ CREATE TABLE IF NOT EXISTS triples (
   subject TEXT,
   relation TEXT,
   object TEXT,
-  cycle INTEGER,
-  round INTEGER
+  act_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS weave_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  priority INTEGER NOT NULL DEFAULT 100,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER,
+  completed_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS print_queue (
@@ -74,15 +79,6 @@ CREATE TABLE IF NOT EXISTS mail_queue (
   in_world_reason TEXT NOT NULL,
   status TEXT NOT NULL,
   created_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS location_seed_queue (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  location TEXT NOT NULL,
-  seed TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  created_at INTEGER NOT NULL,
-  consumed_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS inputs_log (
@@ -104,12 +100,55 @@ def connect(db_path):
     return conn
 
 
-def initialize(conn):
+def initialize(conn, initial_legend):
+    _archive_v1_tables(conn)
     conn.executescript(SCHEMA)
     conn.execute(
         """
-        INSERT OR IGNORE INTO world (id, cycle, round, hope, status)
-        VALUES (1, 1, 0, 40, 'running')
-        """
+        INSERT OR IGNORE INTO world (id, legend_index, legend_text, clue_count, act_seq)
+        VALUES (1, 0, ?, 0, 0)
+        """,
+        (initial_legend,),
     )
+    conn.commit()
+
+
+def _archive_v1_tables(conn):
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'world'"
+    ).fetchone()
+    if row is None:
+        return
+    columns = {
+        item["name"]
+        for item in conn.execute("PRAGMA table_info(world)").fetchall()
+    }
+    if "legend_index" in columns:
+        return
+    for table in [
+        "world",
+        "characters",
+        "acts",
+        "oracle_pool",
+        "triples",
+        "print_queue",
+        "mail_queue",
+        "location_seed_queue",
+        "inputs_log",
+    ]:
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if exists is None:
+            continue
+        backup = f"{table}_v1_backup"
+        suffix = 1
+        while conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (backup,),
+        ).fetchone():
+            suffix += 1
+            backup = f"{table}_v1_backup_{suffix}"
+        conn.execute(f"ALTER TABLE {table} RENAME TO {backup}")
     conn.commit()
