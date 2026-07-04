@@ -83,6 +83,7 @@
   - write project commits,
   - create or update a self-contained HTML artifact; use LLM `artifact` task
     HTML when valid, otherwise use a deterministic per-idea fallback demo shape,
+    with OKLCH CSS tokens and idea-specific app structure,
   - create conversations/gossip,
   - write agent memories and intents,
   - handle pitch reviews and awards when in those phases.
@@ -167,6 +168,9 @@
   `batchId`, `templateId`, `charId`) to v4 API responses.
 - Bad: treating generated dialogue as the only output; every claimed project
   must have a visible artifact URL.
+- Bad: serving a generic artifact shell with "run demo", "original idea",
+  "project progress", or "AI Hackathon Demo" copy at `/artifacts/idea-:id.html`;
+  those words belong on the progress page if needed, not in the visual demo.
 - Bad: reintroducing token requirements for `/api/print/pending` or
   `/api/print/ack` without an explicit product decision and matching tests.
 

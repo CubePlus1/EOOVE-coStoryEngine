@@ -948,10 +948,10 @@ class GameService:
             "commits": self._commits_for_idea(idea["id"]),
             "requirements": [
                 "Return one self-contained HTML document as result.html.",
-                "Use distinct layout and visual concept for this idea.",
-                "Include data-project-id on the main element.",
-                "Include at least one button with meaningful interaction.",
-                "Do not return a progress dashboard.",
+                "Make the HTML the actual idea-specific frontend demo, not a wrapper or progress dashboard.",
+                "Use distinct layout, palette, content, and interaction concept for this idea.",
+                "Include data-project-id and data-demo-kind on the main element.",
+                "Do not include a run-demo button, project intro shell, original idea label, or progress dashboard.",
             ],
         }
 
@@ -965,7 +965,10 @@ class GameService:
         lowered = stripped.lower()
         if "<!doctype html" not in lowered or "</html>" not in lowered:
             return None
-        if "data-project-id" not in stripped or "<button" not in lowered:
+        if "data-project-id" not in stripped:
+            return None
+        blocked_shell_terms = ["运行 demo", "原始 idea", "项目进度", "ai hackathon demo"]
+        if any(term in stripped.lower() for term in blocked_shell_terms):
             return None
         return stripped
 
@@ -1034,6 +1037,23 @@ class GameService:
         return f"{cleaned} Demo"
 
     def _artifact_html(self, idea, team, title, current_form, progress, bug, plan):
+        if plan["kind"] == "cat-match":
+            return self._cat_match_artifact_html(idea, team, title, current_form, bug, plan)
+        if plan["kind"] == "workflow-brief":
+            return self._workflow_brief_artifact_html(idea, team, title, current_form, bug, plan)
+        if plan["kind"] == "stage-pitch":
+            return self._stage_pitch_artifact_html(idea, team, title, current_form, bug, plan)
+        return self._market_signal_artifact_html(idea, team, title, current_form, bug, plan)
+
+    def _artifact_css_tokens(self, plan):
+        return (
+            f"--accent: {html.escape(plan['accent'])}; "
+            f"--second: {html.escape(plan['second'])}; "
+            f"--surface: {html.escape(plan['surface'])}; "
+            f"--ink: {html.escape(plan['ink'])};"
+        )
+
+    def _cat_match_artifact_html(self, idea, team, title, current_form, bug, plan):
         safe_title = html.escape(title)
         safe_idea = html.escape(idea["text"])
         safe_form = html.escape(current_form)
@@ -1041,15 +1061,7 @@ class GameService:
         safe_bug = html.escape(bug or "演示数据偶尔会跑偏")
         safe_receipt = html.escape(idea["receipt_no"])
         safe_kind = html.escape(plan["kind"])
-        safe_label = html.escape(plan["label"])
-        safe_accent = html.escape(plan["accent"])
-        safe_second = html.escape(plan["second"])
-        safe_surface = html.escape(plan["surface"])
-        safe_ink = html.escape(plan["ink"])
-        safe_layout = html.escape(plan["layout"])
-        safe_tagline = html.escape(self._artifact_tagline(current_form, plan))
-        safe_demo_result = html.escape(self._artifact_demo_result(current_form, plan))
-        widget_html = self._artifact_widget_html(plan, safe_form)
+        tokens = self._artifact_css_tokens(plan)
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1057,82 +1069,285 @@ class GameService:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{safe_title}</title>
   <style>
-    :root {{ color-scheme: light; --accent: {safe_accent}; --second: {safe_second}; --surface: {safe_surface}; --ink: {safe_ink}; }}
+    :root {{ color-scheme: light; {tokens} }}
     * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: ui-rounded, 'Avenir Next', 'Trebuchet MS', sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at 12% 12%, var(--second) 0 11rem, transparent 11.2rem),
-        radial-gradient(circle at 88% 18%, var(--accent) 0 9rem, transparent 9.2rem),
-        linear-gradient(135deg, var(--surface) 0%, #fff7d8 44%, var(--second) 100%);
-      min-height: 100vh;
-    }}
-    main {{ width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 32px 0; }}
-    .hero {{ display: grid; grid-template-columns: {safe_layout}; gap: 28px; align-items: stretch; min-height: 520px; }}
-    .brand-panel, .demo-stage {{
-      border: 3px solid var(--ink);
-      border-radius: 22px;
-      background: rgba(255, 252, 238, .92);
-      box-shadow: 10px 10px 0 var(--ink);
-    }}
-    .brand-panel {{ padding: clamp(24px, 5vw, 54px); display: flex; flex-direction: column; justify-content: space-between; }}
-    .idea-chip {{ display: inline-flex; width: fit-content; gap: 8px; align-items: center; padding: 8px 12px; border: 2px solid var(--ink); border-radius: 999px; background: var(--accent); font-weight: 800; }}
-    h1 {{ font-size: clamp(42px, 9vw, 92px); line-height: .9; margin: 30px 0 18px; letter-spacing: 0; }}
-    .tagline {{ font-size: clamp(18px, 3vw, 28px); line-height: 1.25; max-width: 680px; }}
-    .meta-row {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }}
-    .badge {{ padding: 10px 12px; border: 2px solid var(--ink); border-radius: 14px; background: #fff; font-weight: 700; }}
-    .demo-stage {{ padding: 22px; display: grid; grid-template-rows: auto 1fr auto; gap: 18px; background: var(--ink); color: #fffbea; }}
-    .screen {{ min-height: 280px; border: 3px solid #fffbea; border-radius: 18px; padding: 18px; background: linear-gradient(160deg, var(--accent) 0%, var(--second) 48%, var(--surface) 100%); position: relative; overflow: hidden; }}
-    .screen::after {{ content: ""; position: absolute; width: 180px; height: 180px; right: -42px; top: -42px; border: 18px solid rgba(255, 255, 255, .34); border-radius: 50%; }}
-    .screen h2 {{ margin: 0; font-size: 30px; max-width: 320px; }}
-    .result-card {{ position: absolute; left: 18px; right: 18px; bottom: 18px; padding: 16px; border-radius: 16px; background: rgba(255, 251, 234, .95); color: var(--ink); font-weight: 800; }}
-    .pet-card, .brief-card, .market-card, .stage-card {{ position: relative; z-index: 1; display: grid; gap: 10px; width: min(260px, 70%); padding: 14px; border: 3px solid #fffbea; border-radius: 18px; background: rgba(255,255,255,.22); backdrop-filter: blur(2px); }}
-    .pet-card span, .brief-card span, .market-card span, .stage-card span {{ display: inline-block; padding: 7px 9px; border-radius: 999px; background: rgba(255,251,234,.9); color: var(--ink); font-weight: 900; }}
-    label {{ font-weight: 800; }}
-    input {{ width: 100%; margin-top: 8px; padding: 14px; border: 3px solid #fffbea; border-radius: 14px; background: #fffbea; color: #231f20; font: inherit; }}
-    button {{ border: 0; border-radius: 999px; background: var(--accent); color: var(--ink); padding: 14px 18px; font-weight: 900; cursor: pointer; box-shadow: 0 5px 0 #000; }}
-    #result {{ margin-top: 12px; min-height: 50px; line-height: 1.45; }}
-    @media (max-width: 760px) {{ .hero {{ grid-template-columns: 1fr; }} .brand-panel, .demo-stage {{ box-shadow: 6px 6px 0 #231f20; }} }}
+    body {{ margin: 0; min-height: 100vh; color: var(--ink); background: linear-gradient(135deg, oklch(96% .09 98) 0%, var(--surface) 42%, oklch(91% .12 355) 100%); font-family: ui-rounded, 'Avenir Next', 'Trebuchet MS', sans-serif; }}
+    .match-app {{ width: min(1180px, calc(100% - 28px)); margin: 0 auto; padding: clamp(18px, 4vw, 44px) 0; }}
+    .match-shell {{ display: grid; grid-template-columns: .9fr 1.1fr; gap: clamp(18px, 4vw, 34px); align-items: stretch; }}
+    .match-copy {{ padding: clamp(18px, 4vw, 40px); border: 3px solid var(--ink); border-radius: 8px; background: oklch(98% .025 82); box-shadow: 8px 8px 0 var(--ink); }}
+    .kicker {{ font-weight: 900; color: oklch(44% .16 8); text-transform: uppercase; letter-spacing: 0; }}
+    h1 {{ margin: 16px 0; font-size: clamp(34px, 7vw, 82px); line-height: .92; letter-spacing: 0; }}
+    .lead {{ font-size: clamp(17px, 2.4vw, 24px); line-height: 1.35; max-width: 620px; }}
+    .toolbar {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }}
+    .chip {{ border: 2px solid var(--ink); border-radius: 999px; padding: 9px 12px; background: var(--second); font-weight: 900; }}
+    .deck {{ display: grid; gap: 16px; }}
+    .profile-card {{ min-height: 410px; padding: 20px; border: 3px solid var(--ink); border-radius: 8px; background: linear-gradient(160deg, var(--accent), oklch(91% .18 98) 52%, oklch(98% .025 82)); box-shadow: 8px 8px 0 var(--ink); display: grid; grid-template-rows: auto 1fr auto; overflow: hidden; }}
+    .pet-face {{ width: 150px; height: 150px; border: 4px solid var(--ink); border-radius: 50%; background: radial-gradient(circle at 35% 38%, var(--ink) 0 7px, transparent 8px), radial-gradient(circle at 65% 38%, var(--ink) 0 7px, transparent 8px), radial-gradient(circle at 50% 58%, var(--ink) 0 9px, transparent 10px), var(--surface); margin: 0 auto; }}
+    .score {{ display: flex; justify-content: space-between; align-items: end; gap: 16px; }}
+    .score strong {{ font-size: clamp(48px, 9vw, 86px); line-height: .9; }}
+    .tags {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }}
+    .tags span {{ padding: 8px 10px; border: 2px solid var(--ink); border-radius: 999px; background: oklch(98% .025 82); font-weight: 800; }}
+    .actions {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
+    button {{ border: 3px solid var(--ink); border-radius: 8px; padding: 14px; background: oklch(98% .025 82); color: var(--ink); font: inherit; font-weight: 900; cursor: pointer; box-shadow: 0 4px 0 var(--ink); }}
+    button.primary {{ background: var(--accent); }}
+    .queue {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }}
+    .mini {{ padding: 12px; min-height: 90px; border: 2px solid var(--ink); border-radius: 8px; background: oklch(98% .025 82); font-weight: 800; }}
+    #matchResult {{ margin-top: 14px; padding: 14px; border: 2px solid var(--ink); border-radius: 8px; background: var(--surface); font-weight: 900; }}
+    @media (max-width: 780px) {{ .match-shell {{ grid-template-columns: 1fr; }} .queue {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
 <body>
-  <main data-project-id="{idea['id']}" data-receipt-no="{safe_receipt}" data-demo-kind="{safe_kind}">
-    <section class="hero">
-      <div class="brand-panel">
-        <div>
-          <span class="idea-chip">{safe_label}</span>
-          <h1>{safe_title}</h1>
-          <p class="tagline">{safe_tagline}</p>
+  <main class="match-app" data-project-id="{idea['id']}" data-receipt-no="{safe_receipt}" data-demo-kind="{safe_kind}">
+    <section class="match-shell">
+      <div class="match-copy">
+        <div class="kicker">Pet Match Studio · {safe_team}</div>
+        <h1>{safe_form}</h1>
+        <p class="lead">输入的想法已经变成一个宠物匹配前台：用户打开后先看推荐对象、匹配理由和下一步聊天开场。</p>
+        <div class="toolbar">
+          <span class="chip">同城可约</span>
+          <span class="chip">性格互补</span>
+          <span class="chip">疫苗已验证</span>
+          <span class="chip">{safe_receipt}</span>
         </div>
-        <div class="meta-row">
-          <span class="badge">{safe_team}</span>
-          <span class="badge">{safe_receipt}</span>
-          <span class="badge">原始 idea: {safe_idea}</span>
-        </div>
+        <div id="matchResult">推荐解释：{safe_idea} 被拆成偏好标签、距离约束和主人沟通提示。</div>
       </div>
-      <div class="demo-stage">
-        <div class="screen">
-          <h2>{safe_form}</h2>
-          {widget_html}
-          <div class="result-card" id="showcase">{safe_demo_result}</div>
-        </div>
-        <div>
-          <label for="demo-input">现场输入</label>
-          <input id="demo-input" value="{safe_idea}">
-          <div id="result">当前演示风险: {safe_bug}</div>
-        </div>
-        <button onclick="runDemo()">运行 demo</button>
+      <div class="deck">
+        <article class="profile-card">
+          <div class="score"><span>今日首推</span><strong>96%</strong></div>
+          <div>
+            <div class="pet-face" aria-label="推荐宠物头像"></div>
+            <div class="tags">
+              <span>慢热但粘人</span><span>接受视频相看</span><span>周末可见</span>
+            </div>
+          </div>
+          <div class="actions">
+            <button onclick="skipPet()">跳过</button>
+            <button class="primary" onclick="likePet()">喜欢</button>
+          </div>
+        </article>
+        <section class="queue">
+          <div class="mini">布偶 · 安静 · 距离 1.2km</div>
+          <div class="mini">橘猫 · 爱玩 · 今晚在线</div>
+          <div class="mini">奶牛猫 · 胆大 · 接受合照</div>
+        </section>
       </div>
     </section>
   </main>
   <script>
-    function runDemo() {{
-      const value = document.getElementById('demo-input').value || '{safe_idea}';
-      const message = '已把“' + value + '”转换成可展示结果: {safe_form}。';
-      document.getElementById('showcase').textContent = message;
-      document.getElementById('result').textContent = '演示已刷新,评委现在能看到一个真实前端页面。';
+    function likePet() {{
+      document.getElementById('matchResult').textContent = '已喜欢：系统生成开场白、主人确认卡和见面提醒。';
+    }}
+    function skipPet() {{
+      document.getElementById('matchResult').textContent = '已跳过：下一张推荐会降低活泼指数并提高同城权重。风险：{safe_bug}';
+    }}
+  </script>
+</body>
+</html>"""
+
+    def _workflow_brief_artifact_html(self, idea, team, title, current_form, bug, plan):
+        safe_title = html.escape(title)
+        safe_idea = html.escape(idea["text"])
+        safe_form = html.escape(current_form)
+        safe_team = html.escape(team["name"])
+        safe_bug = html.escape(bug or "摘要里可能混进玩笑话")
+        safe_receipt = html.escape(idea["receipt_no"])
+        safe_kind = html.escape(plan["kind"])
+        tokens = self._artifact_css_tokens(plan)
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{safe_title}</title>
+  <style>
+    :root {{ color-scheme: light; {tokens} }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; background: oklch(98% .018 246); color: var(--ink); font-family: Optima, 'Avenir Next', 'Trebuchet MS', sans-serif; }}
+    .brief-app {{ width: min(1180px, calc(100% - 28px)); margin: 0 auto; padding: clamp(18px, 4vw, 44px) 0; }}
+    .brief-grid {{ display: grid; grid-template-columns: 1.05fr .95fr; gap: 22px; align-items: start; }}
+    header {{ border-bottom: 4px solid var(--ink); padding-bottom: 18px; margin-bottom: 20px; }}
+    h1 {{ margin: 8px 0; font-size: clamp(32px, 6vw, 68px); line-height: .98; letter-spacing: 0; }}
+    .context {{ color: oklch(42% .06 255); font-size: 18px; line-height: 1.45; }}
+    .summary-board {{ display: grid; gap: 14px; padding: 18px; border: 2px solid oklch(87% .04 250); border-radius: 8px; background: linear-gradient(180deg, oklch(99% .006 250) 0%, oklch(95% .035 245) 100%); }}
+    .summary-row {{ display: grid; grid-template-columns: 130px 1fr; gap: 14px; padding: 14px; border: 1px solid oklch(91% .03 248); border-radius: 8px; background: oklch(99% .006 250); }}
+    .summary-row strong {{ color: oklch(42% .14 240); }}
+    .action-list {{ display: grid; gap: 12px; }}
+    .action-item {{ display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 14px; border: 2px solid var(--ink); border-radius: 8px; background: var(--surface); }}
+    .check {{ width: 28px; height: 28px; border-radius: 50%; background: var(--second); border: 2px solid var(--ink); display: grid; place-items: center; font-weight: 900; }}
+    aside {{ padding: 18px; border: 3px solid var(--ink); border-radius: 8px; background: linear-gradient(145deg, var(--accent), var(--second)); box-shadow: 8px 8px 0 var(--ink); }}
+    .metric {{ display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 14px 0; border-bottom: 2px solid oklch(26% .07 260 / .3); font-weight: 900; }}
+    .metric:last-child {{ border-bottom: 0; }}
+    button {{ margin-top: 18px; width: 100%; border: 3px solid var(--ink); border-radius: 8px; padding: 14px; background: oklch(99% .006 250); color: var(--ink); font: inherit; font-weight: 900; cursor: pointer; box-shadow: 0 4px 0 var(--ink); }}
+    #briefState {{ margin-top: 12px; padding: 14px; border-radius: 8px; background: oklch(99% .006 250 / .78); font-weight: 800; }}
+    @media (max-width: 780px) {{ .brief-grid {{ grid-template-columns: 1fr; }} .summary-row {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <main class="brief-app" data-project-id="{idea['id']}" data-receipt-no="{safe_receipt}" data-demo-kind="{safe_kind}">
+    <header>
+      <div>{safe_team} · Brief Ops Console</div>
+      <h1>{safe_form}</h1>
+      <p class="context">会议内容被压成摘要、行动项、负责人和截止时间；用户看到的是一个能直接接管会后跟进的工作台。</p>
+    </header>
+    <section class="brief-grid">
+      <div class="summary-board">
+        <div class="summary-row"><strong>摘要</strong><span>{safe_idea} 的核心诉求被归纳为“减少会后遗忘、明确责任、自动追踪”。</span></div>
+        <div class="summary-row"><strong>关键决定</strong><span>先上线三栏视图：摘要、行动项、风险。</span></div>
+        <div class="summary-row"><strong>风险</strong><span>{safe_bug}</span></div>
+      </div>
+      <aside>
+        <div class="metric"><span>行动项</span><span>4</span></div>
+        <div class="metric"><span>负责人</span><span>3</span></div>
+        <div class="metric"><span>今日截止</span><span>2</span></div>
+        <div class="action-list">
+          <div class="action-item"><span class="check">1</span><span>整理客户问题清单</span><strong>小林</strong></div>
+          <div class="action-item"><span class="check">2</span><span>补齐邮件模板</span><strong>阿倔</strong></div>
+          <div class="action-item"><span class="check">3</span><span>生成下次会议议程</span><strong>像素洁癖</strong></div>
+        </div>
+        <button onclick="resolveBrief()">标记行动项已同步</button>
+        <div id="briefState">等待团队确认纪要版本。</div>
+      </aside>
+    </section>
+  </main>
+  <script>
+    function resolveBrief() {{
+      document.getElementById('briefState').textContent = '已同步：行动项进入负责人队列，下一封跟进邮件已排好。';
+    }}
+  </script>
+</body>
+</html>"""
+
+    def _stage_pitch_artifact_html(self, idea, team, title, current_form, bug, plan):
+        safe_title = html.escape(title)
+        safe_idea = html.escape(idea["text"])
+        safe_form = html.escape(current_form)
+        safe_team = html.escape(team["name"])
+        safe_bug = html.escape(bug or "评委可能追问商业模式")
+        safe_receipt = html.escape(idea["receipt_no"])
+        safe_kind = html.escape(plan["kind"])
+        tokens = self._artifact_css_tokens(plan)
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{safe_title}</title>
+  <style>
+    :root {{ color-scheme: light; {tokens} }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; color: var(--ink); background: linear-gradient(120deg, oklch(96% .07 93) 0%, oklch(92% .08 50) 48%, oklch(95% .035 292) 100%); font-family: Georgia, 'Times New Roman', serif; }}
+    .pitch-app {{ width: min(1180px, calc(100% - 28px)); margin: 0 auto; padding: clamp(20px, 4vw, 46px) 0; }}
+    .stage {{ display: grid; grid-template-columns: 1.1fr .9fr; gap: 24px; align-items: stretch; }}
+    .slide {{ min-height: 560px; padding: clamp(22px, 5vw, 54px); border: 4px solid var(--ink); border-radius: 8px; background: var(--surface); box-shadow: inset 0 -18px 0 oklch(78% .17 77 / .35), 10px 10px 0 var(--ink); }}
+    h1 {{ margin: 18px 0; font-size: clamp(42px, 8vw, 88px); line-height: .88; letter-spacing: 0; }}
+    .subtitle {{ font-size: clamp(18px, 2.6vw, 28px); line-height: 1.35; }}
+    .spotlight {{ margin-top: 30px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }}
+    .spotlight div {{ min-height: 120px; padding: 14px; border: 3px solid var(--ink); border-radius: 8px; background: oklch(98% .03 86); font-weight: 900; }}
+    .judge-panel {{ padding: 18px; border: 4px solid var(--ink); border-radius: 8px; background: linear-gradient(180deg, var(--accent), var(--second)); box-shadow: 10px 10px 0 var(--ink); }}
+    .timer {{ font-size: clamp(52px, 10vw, 96px); line-height: .9; font-weight: 900; }}
+    .qa {{ display: grid; gap: 12px; margin-top: 18px; }}
+    .qa article {{ padding: 14px; border: 2px solid var(--ink); border-radius: 8px; background: oklch(99% .006 80 / .82); }}
+    button {{ margin-top: 18px; width: 100%; border: 3px solid var(--ink); border-radius: 8px; padding: 14px; background: oklch(98% .03 86); color: var(--ink); font: inherit; font-weight: 900; cursor: pointer; box-shadow: 0 4px 0 var(--ink); }}
+    #pitchLine {{ margin-top: 14px; padding: 14px; border: 2px solid var(--ink); border-radius: 8px; background: oklch(98% .03 86); font-weight: 900; }}
+    @media (max-width: 780px) {{ .stage {{ grid-template-columns: 1fr; }} .spotlight {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <main class="pitch-app" data-project-id="{idea['id']}" data-receipt-no="{safe_receipt}" data-demo-kind="{safe_kind}">
+    <section class="stage">
+      <div class="slide">
+        <div>{safe_team} · Pitch Stage Kit</div>
+        <h1>{safe_form}</h1>
+        <p class="subtitle">这个页面把想法变成路演现场可投屏的讲稿：卖点、证据、风险和评委问答同屏可见。</p>
+        <div class="spotlight">
+          <div>卖点：{safe_idea}</div>
+          <div>证据：现场 demo 可打开</div>
+          <div>风险：{safe_bug}</div>
+        </div>
+      </div>
+      <aside class="judge-panel">
+        <div>路演倒计时</div>
+        <div class="timer" id="timer">03:00</div>
+        <div class="qa">
+          <article><strong>评委问：</strong>用户为什么现在需要它？</article>
+          <article><strong>回答：</strong>因为原流程没有即时反馈，demo 先证明第一步。</article>
+          <article><strong>追问：</strong>如何扩展？先保存结果，再接邮件和打印票据。</article>
+        </div>
+        <button onclick="nextPitchLine()">切到下一句讲稿</button>
+        <div id="pitchLine">开场：我们没有承诺全做完，但已经把第一屏做出来了。</div>
+      </aside>
+    </section>
+  </main>
+  <script>
+    let line = 0;
+    const lines = ['痛点：用户现在只能靠想象。', '方案：把输入变成能操作的一页。', '收尾：二维码打开就是当前产物。'];
+    function nextPitchLine() {{
+      line = (line + 1) % lines.length;
+      document.getElementById('pitchLine').textContent = lines[line];
+    }}
+  </script>
+</body>
+</html>"""
+
+    def _market_signal_artifact_html(self, idea, team, title, current_form, bug, plan):
+        safe_title = html.escape(title)
+        safe_idea = html.escape(idea["text"])
+        safe_form = html.escape(current_form)
+        safe_team = html.escape(team["name"])
+        safe_bug = html.escape(bug or "样本量还不够")
+        safe_receipt = html.escape(idea["receipt_no"])
+        safe_kind = html.escape(plan["kind"])
+        tokens = self._artifact_css_tokens(plan)
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{safe_title}</title>
+  <style>
+    :root {{ color-scheme: light; {tokens} }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; background: oklch(98% .035 154); color: var(--ink); font-family: 'Avenir Next', Verdana, sans-serif; }}
+    .signal-app {{ width: min(1180px, calc(100% - 28px)); margin: 0 auto; padding: clamp(20px, 4vw, 46px) 0; }}
+    .signal-grid {{ display: grid; grid-template-columns: .9fr 1.1fr; gap: 24px; }}
+    .brief {{ padding: clamp(20px, 4vw, 44px); border: 3px solid var(--ink); border-radius: 8px; background: oklch(97% .045 154); box-shadow: 8px 8px 0 var(--ink); }}
+    h1 {{ margin: 14px 0; font-size: clamp(36px, 7vw, 80px); line-height: .92; letter-spacing: 0; }}
+    .lead {{ font-size: clamp(18px, 2.4vw, 26px); line-height: 1.35; }}
+    .market-board {{ display: grid; gap: 14px; }}
+    .signal-card {{ padding: 18px; border: 3px solid var(--ink); border-radius: 8px; background: linear-gradient(145deg, oklch(99% .006 154), var(--surface)); }}
+    .big {{ font-size: clamp(42px, 8vw, 76px); line-height: .9; font-weight: 900; }}
+    .segments {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }}
+    .segment {{ padding: 14px; min-height: 130px; border: 2px solid var(--ink); border-radius: 8px; background: oklch(99% .006 154); font-weight: 800; }}
+    .bar {{ height: 16px; margin-top: 12px; border: 2px solid var(--ink); border-radius: 999px; background: linear-gradient(90deg, var(--accent) 0 68%, oklch(99% .006 154) 68% 100%); }}
+    button {{ margin-top: 18px; border: 3px solid var(--ink); border-radius: 8px; padding: 14px 18px; background: var(--second); color: oklch(99% .006 154); font: inherit; font-weight: 900; cursor: pointer; box-shadow: 0 4px 0 var(--ink); }}
+    #signalNote {{ margin-top: 14px; padding: 14px; border: 2px solid var(--ink); border-radius: 8px; background: oklch(99% .006 154); font-weight: 900; }}
+    @media (max-width: 780px) {{ .signal-grid, .segments {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <main class="signal-app" data-project-id="{idea['id']}" data-receipt-no="{safe_receipt}" data-demo-kind="{safe_kind}">
+    <section class="signal-grid">
+      <div class="brief">
+        <div>{safe_team} · Signal Market Lab</div>
+        <h1>{safe_form}</h1>
+        <p class="lead">这个产物把想法变成市场信号板：用户是谁、为什么会点、第一屏如何说服他们，都在页面里直接展示。</p>
+        <button onclick="refreshSignal()">刷新用户信号</button>
+        <div id="signalNote">当前假设来自：{safe_idea}</div>
+      </div>
+      <div class="market-board">
+        <article class="signal-card"><span>需求强度</span><div class="big">68</div><div class="bar"></div></article>
+        <section class="segments">
+          <div class="segment">早期用户<br>愿意先试一个轻量页面</div>
+          <div class="segment">付费理由<br>节省第一次理解成本</div>
+          <div class="segment">主要风险<br>{safe_bug}</div>
+        </section>
+        <article class="signal-card">首屏文案：先给用户一个能点、能看、能分享的结果，再谈完整系统。</article>
+      </div>
+    </section>
+  </main>
+  <script>
+    function refreshSignal() {{
+      document.getElementById('signalNote').textContent = '信号刷新：已提高早期用户权重，并把转化假设放到首屏。';
     }}
   </script>
 </body>
@@ -1154,37 +1369,37 @@ class GameService:
             "cat-match": {
                 "kind": "cat-match",
                 "label": "Pet Match Studio",
-                "accent": "#ff7aa8",
-                "second": "#ffe45e",
-                "surface": "#8cf5d2",
-                "ink": "#2a1831",
+                "accent": "oklch(72% .19 7)",
+                "second": "oklch(90% .18 98)",
+                "surface": "oklch(87% .14 168)",
+                "ink": "oklch(23% .07 325)",
                 "layout": ".9fr 1.1fr",
             },
             "workflow-brief": {
                 "kind": "workflow-brief",
                 "label": "Brief Ops Console",
-                "accent": "#62d0ff",
-                "second": "#b8ff6a",
-                "surface": "#f4e7ff",
-                "ink": "#16243d",
+                "accent": "oklch(78% .14 225)",
+                "second": "oklch(88% .18 133)",
+                "surface": "oklch(94% .055 304)",
+                "ink": "oklch(25% .065 260)",
                 "layout": "1.2fr .8fr",
             },
             "stage-pitch": {
                 "kind": "stage-pitch",
                 "label": "Pitch Stage Kit",
-                "accent": "#ffb000",
-                "second": "#ff6a3d",
-                "surface": "#f2f0ff",
-                "ink": "#251600",
+                "accent": "oklch(78% .17 77)",
+                "second": "oklch(68% .19 38)",
+                "surface": "oklch(95% .035 292)",
+                "ink": "oklch(22% .055 65)",
                 "layout": "1fr 1fr",
             },
             "market-signal": {
                 "kind": "market-signal",
                 "label": "Signal Market Lab",
-                "accent": "#00d084",
-                "second": "#7c5cff",
-                "surface": "#e9fff5",
-                "ink": "#10251c",
+                "accent": "oklch(74% .16 154)",
+                "second": "oklch(58% .18 285)",
+                "surface": "oklch(96% .05 154)",
+                "ink": "oklch(24% .055 160)",
                 "layout": ".85fr 1.15fr",
             },
         }
