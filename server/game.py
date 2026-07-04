@@ -591,7 +591,7 @@ class GameService:
                 "UPDATE agents SET intent = ?, location = ?, talking = 0 WHERE id = ?",
                 (result["intents"].get(agent["id"]) or "想继续打探别队进度", "泡面咖啡角", agent["id"]),
             )
-        gossip_text = f"泡面角有人提到了你的idea: {idea_text}"
+        gossip_text = f"展区有人提到了你的idea: {idea_text}"
         self._event(edition["id"], "conversation", {
             "conversationId": conversation_id,
             "location": "泡面咖啡角",
@@ -948,10 +948,11 @@ class GameService:
             "commits": self._commits_for_idea(idea["id"]),
             "requirements": [
                 "Return one self-contained HTML document as result.html.",
-                "Use distinct layout and visual concept for this idea.",
-                "Include data-project-id on the main element.",
-                "Include at least one button with meaningful interaction.",
-                "Do not return a progress dashboard.",
+                "Make the HTML the actual idea-specific frontend demo, not a wrapper or progress dashboard.",
+                "Use a purpose-built layout, palette, content model, and interaction concept for this exact idea.",
+                "Include data-project-id, data-demo-kind, and data-idea-fingerprint on the main element.",
+                "Do not include a run-demo button, project intro shell, original idea label, or progress dashboard.",
+                "Do not describe fake random bugs; only show product states that belong to the idea.",
             ],
         }
 
@@ -965,7 +966,10 @@ class GameService:
         lowered = stripped.lower()
         if "<!doctype html" not in lowered or "</html>" not in lowered:
             return None
-        if "data-project-id" not in stripped or "<button" not in lowered:
+        if "data-project-id" not in stripped:
+            return None
+        blocked_shell_terms = ["运行 demo", "原始 idea", "项目进度", "ai hackathon demo", "猫的照片识别成需求文档", "泡面角"]
+        if any(term in stripped.lower() for term in blocked_shell_terms):
             return None
         return stripped
 
@@ -1034,106 +1038,331 @@ class GameService:
         return f"{cleaned} Demo"
 
     def _artifact_html(self, idea, team, title, current_form, progress, bug, plan):
-        safe_title = html.escape(title)
-        safe_idea = html.escape(idea["text"])
-        safe_form = html.escape(current_form)
-        safe_team = html.escape(team["name"])
-        safe_bug = html.escape(bug or "演示数据偶尔会跑偏")
-        safe_receipt = html.escape(idea["receipt_no"])
-        safe_kind = html.escape(plan["kind"])
-        safe_label = html.escape(plan["label"])
-        safe_accent = html.escape(plan["accent"])
-        safe_second = html.escape(plan["second"])
-        safe_surface = html.escape(plan["surface"])
-        safe_ink = html.escape(plan["ink"])
-        safe_layout = html.escape(plan["layout"])
-        safe_tagline = html.escape(self._artifact_tagline(current_form, plan))
-        safe_demo_result = html.escape(self._artifact_demo_result(current_form, plan))
-        widget_html = self._artifact_widget_html(plan, safe_form)
+        if plan["kind"] == "cat-match" and "狗" in idea["text"]:
+            return self._dog_route_artifact_html(idea, team, title, current_form, plan)
+        if plan["kind"] == "cat-match":
+            return self._cat_match_artifact_html(idea, team, title, current_form, plan)
+        if plan["kind"] == "workflow-brief":
+            return self._workflow_brief_artifact_html(idea, team, title, current_form, plan)
+        if plan["kind"] == "stage-pitch":
+            return self._stage_pitch_artifact_html(idea, team, title, current_form, plan)
+        return self._market_signal_artifact_html(idea, team, title, current_form, plan)
+
+    def _artifact_fingerprint(self, idea_text, current_form):
+        return hashlib.sha1(f"{idea_text} {current_form}".lower().encode("utf-8")).hexdigest()[:8]
+
+    def _artifact_common_values(self, idea, team, title, current_form, plan):
+        return {
+            "title": html.escape(title),
+            "idea": html.escape(idea["text"]),
+            "form": html.escape(current_form),
+            "team": html.escape(team["name"]),
+            "receipt": html.escape(idea["receipt_no"]),
+            "kind": html.escape(plan["kind"]),
+            "label": html.escape(plan["label"]),
+            "fingerprint": html.escape(self._artifact_fingerprint(idea["text"], current_form)),
+            "accent": html.escape(plan["accent"]),
+            "second": html.escape(plan["second"]),
+            "surface": html.escape(plan["surface"]),
+            "ink": html.escape(plan["ink"]),
+        }
+
+    def _artifact_css_tokens(self, safe):
+        return (
+            f"--accent: {safe['accent']}; "
+            f"--second: {safe['second']}; "
+            f"--surface: {safe['surface']}; "
+            f"--ink: {safe['ink']};"
+        )
+
+    def _cat_match_artifact_html(self, idea, team, title, current_form, plan):
+        safe = self._artifact_common_values(idea, team, title, current_form, plan)
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe_title}</title>
+  <title>{safe['title']}</title>
   <style>
-    :root {{ color-scheme: light; --accent: {safe_accent}; --second: {safe_second}; --surface: {safe_surface}; --ink: {safe_ink}; }}
+    :root {{ color-scheme: light; {self._artifact_css_tokens(safe)} --milk: oklch(98% .025 28); --blush: color-mix(in oklch, var(--accent) 30%, var(--milk)); }}
     * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: ui-rounded, 'Avenir Next', 'Trebuchet MS', sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at 12% 12%, var(--second) 0 11rem, transparent 11.2rem),
-        radial-gradient(circle at 88% 18%, var(--accent) 0 9rem, transparent 9.2rem),
-        linear-gradient(135deg, var(--surface) 0%, #fff7d8 44%, var(--second) 100%);
-      min-height: 100vh;
-    }}
-    main {{ width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 32px 0; }}
-    .hero {{ display: grid; grid-template-columns: {safe_layout}; gap: 28px; align-items: stretch; min-height: 520px; }}
-    .brand-panel, .demo-stage {{
-      border: 3px solid var(--ink);
-      border-radius: 22px;
-      background: rgba(255, 252, 238, .92);
-      box-shadow: 10px 10px 0 var(--ink);
-    }}
-    .brand-panel {{ padding: clamp(24px, 5vw, 54px); display: flex; flex-direction: column; justify-content: space-between; }}
-    .idea-chip {{ display: inline-flex; width: fit-content; gap: 8px; align-items: center; padding: 8px 12px; border: 2px solid var(--ink); border-radius: 999px; background: var(--accent); font-weight: 800; }}
-    h1 {{ font-size: clamp(42px, 9vw, 92px); line-height: .9; margin: 30px 0 18px; letter-spacing: 0; }}
-    .tagline {{ font-size: clamp(18px, 3vw, 28px); line-height: 1.25; max-width: 680px; }}
-    .meta-row {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }}
-    .badge {{ padding: 10px 12px; border: 2px solid var(--ink); border-radius: 14px; background: #fff; font-weight: 700; }}
-    .demo-stage {{ padding: 22px; display: grid; grid-template-rows: auto 1fr auto; gap: 18px; background: var(--ink); color: #fffbea; }}
-    .screen {{ min-height: 280px; border: 3px solid #fffbea; border-radius: 18px; padding: 18px; background: linear-gradient(160deg, var(--accent) 0%, var(--second) 48%, var(--surface) 100%); position: relative; overflow: hidden; }}
-    .screen::after {{ content: ""; position: absolute; width: 180px; height: 180px; right: -42px; top: -42px; border: 18px solid rgba(255, 255, 255, .34); border-radius: 50%; }}
-    .screen h2 {{ margin: 0; font-size: 30px; max-width: 320px; }}
-    .result-card {{ position: absolute; left: 18px; right: 18px; bottom: 18px; padding: 16px; border-radius: 16px; background: rgba(255, 251, 234, .95); color: var(--ink); font-weight: 800; }}
-    .pet-card, .brief-card, .market-card, .stage-card {{ position: relative; z-index: 1; display: grid; gap: 10px; width: min(260px, 70%); padding: 14px; border: 3px solid #fffbea; border-radius: 18px; background: rgba(255,255,255,.22); backdrop-filter: blur(2px); }}
-    .pet-card span, .brief-card span, .market-card span, .stage-card span {{ display: inline-block; padding: 7px 9px; border-radius: 999px; background: rgba(255,251,234,.9); color: var(--ink); font-weight: 900; }}
-    label {{ font-weight: 800; }}
-    input {{ width: 100%; margin-top: 8px; padding: 14px; border: 3px solid #fffbea; border-radius: 14px; background: #fffbea; color: #231f20; font: inherit; }}
-    button {{ border: 0; border-radius: 999px; background: var(--accent); color: var(--ink); padding: 14px 18px; font-weight: 900; cursor: pointer; box-shadow: 0 5px 0 #000; }}
-    #result {{ margin-top: 12px; min-height: 50px; line-height: 1.45; }}
-    @media (max-width: 760px) {{ .hero {{ grid-template-columns: 1fr; }} .brand-panel, .demo-stage {{ box-shadow: 6px 6px 0 #231f20; }} }}
+    body {{ margin: 0; min-height: 100vh; color: var(--ink); background: linear-gradient(148deg, var(--milk), var(--surface) 52%, var(--blush)); font-family: Optima, 'Avenir Next', sans-serif; }}
+    .cat-match-app {{ width: min(1160px, calc(100% - 30px)); margin: 0 auto; padding: clamp(20px, 5vw, 58px) 0; }}
+    .cat-salon-{safe['fingerprint']} {{ display: grid; grid-template-columns: minmax(0, .74fr) minmax(320px, .46fr); gap: 24px; align-items: start; }}
+    .cat-intake {{ min-height: 560px; padding: clamp(24px, 5vw, 60px); border: 3px solid var(--ink); border-radius: 28px 28px 10px 28px; background: radial-gradient(circle at 18% 18%, var(--second), transparent 26%), var(--milk); }}
+    .cat-kicker {{ font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }}
+    .cat-intake h1 {{ margin: 18px 0; font-size: clamp(42px, 8vw, 90px); line-height: .88; letter-spacing: 0; }}
+    .cat-intake p {{ font-size: clamp(18px, 2.5vw, 28px); line-height: 1.35; max-width: 720px; text-wrap: pretty; }}
+    .temperament-strip {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 34px; }}
+    .temperament-strip article {{ min-height: 145px; padding: 16px; border: 2px solid var(--ink); border-radius: 18px; background: color-mix(in oklch, var(--accent) 24%, var(--milk)); }}
+    .temperament-strip span {{ display: block; font-size: 13px; font-weight: 900; opacity: .72; }}
+    .temperament-strip strong {{ display: block; margin-top: 8px; font-size: clamp(28px, 4vw, 54px); line-height: .9; }}
+    .cat-match-card {{ padding: 22px; border: 3px solid var(--ink); border-radius: 10px 28px 28px 10px; background: var(--surface); box-shadow: 10px 10px 0 var(--ink); }}
+    .cat-score {{ display: flex; justify-content: space-between; align-items: end; gap: 18px; border-bottom: 2px solid var(--ink); padding-bottom: 16px; }}
+    .cat-score strong {{ font-size: clamp(54px, 9vw, 96px); line-height: .82; }}
+    .cat-ritual {{ list-style: none; padding: 0; margin: 22px 0; display: grid; gap: 12px; }}
+    .cat-ritual li {{ padding: 12px 0; border-bottom: 1px solid color-mix(in oklch, var(--ink) 32%, transparent); }}
+    .cat-actions {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+    .cat-actions button {{ min-height: 48px; border: 2px solid var(--ink); border-radius: 999px; background: var(--accent); font: inherit; font-weight: 900; cursor: pointer; }}
+    #catOutcome {{ margin-top: 16px; padding: 14px; border: 2px solid var(--ink); border-radius: 16px; background: var(--milk); font-weight: 800; }}
+    @media (max-width: 820px) {{ .cat-salon-{safe['fingerprint']}, .temperament-strip {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
 <body>
-  <main data-project-id="{idea['id']}" data-receipt-no="{safe_receipt}" data-demo-kind="{safe_kind}">
-    <section class="hero">
-      <div class="brand-panel">
-        <div>
-          <span class="idea-chip">{safe_label}</span>
-          <h1>{safe_title}</h1>
-          <p class="tagline">{safe_tagline}</p>
-        </div>
-        <div class="meta-row">
-          <span class="badge">{safe_team}</span>
-          <span class="badge">{safe_receipt}</span>
-          <span class="badge">原始 idea: {safe_idea}</span>
-        </div>
+  <main class="cat-match-app cat-salon-{safe['fingerprint']}" data-project-id="{idea['id']}" data-receipt-no="{safe['receipt']}" data-demo-kind="{safe['kind']}" data-idea-fingerprint="{safe['fingerprint']}">
+    <section class="cat-intake">
+      <div class="cat-kicker">Cat Match / {safe['team']}</div>
+      <h1>{safe['form']}</h1>
+      <p>{safe['form']} 是一个猫咪低压力相看页面：主人先确认性格、绝育状态和沟通边界，再决定是否发起相看。</p>
+      <div class="temperament-strip">
+        <article><span>今日推荐</span><strong>96%</strong><p>按性格、距离和主人回复习惯排序。</p></article>
+        <article><span>相处节奏</span><strong>慢热</strong><p>先交换近况，再短时间视频相看。</p></article>
+        <article><span>主人确认</span><strong>3项</strong><p>疫苗、绝育、见面环境都必须确认。</p></article>
       </div>
-      <div class="demo-stage">
-        <div class="screen">
-          <h2>{safe_form}</h2>
-          {widget_html}
-          <div class="result-card" id="showcase">{safe_demo_result}</div>
-        </div>
-        <div>
-          <label for="demo-input">现场输入</label>
-          <input id="demo-input" value="{safe_idea}">
-          <div id="result">当前演示风险: {safe_bug}</div>
-        </div>
-        <button onclick="runDemo()">运行 demo</button>
+    </section>
+    <aside class="cat-match-card">
+      <div class="cat-score"><span>{safe['receipt']}</span><strong>喵缘</strong></div>
+      <ul class="cat-ritual">
+        <li>输入猫咪性格和相看禁忌</li>
+        <li>筛掉过度活跃或距离过远的对象</li>
+        <li>生成给主人看的温和开场白</li>
+        <li>保存喜欢列表和下一次提醒</li>
+      </ul>
+      <div class="cat-actions">
+        <button type="button" data-cat="已喜欢：系统生成一条温和开场白，并把对方放入相看列表。">喜欢</button>
+        <button type="button" data-cat="已跳过：下一张推荐会降低活泼指数并提高距离权重。">跳过</button>
+      </div>
+      <div id="catOutcome">点击喜欢或跳过可以直接更新当前推荐结果。</div>
+    </aside>
+  </main>
+  <script>
+    document.querySelectorAll('button[data-cat]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        document.getElementById('catOutcome').textContent = button.dataset.cat;
+      }});
+    }});
+  </script>
+</body>
+</html>"""
+
+    def _dog_route_artifact_html(self, idea, team, title, current_form, plan):
+        safe = self._artifact_common_values(idea, team, title, current_form, plan)
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{safe['title']}</title>
+  <style>
+    :root {{ color-scheme: light; {self._artifact_css_tokens(safe)} --field: oklch(96% .07 145); --path: oklch(89% .11 88); }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; color: var(--ink); background: linear-gradient(90deg, var(--field), var(--path)); font-family: 'Gill Sans', 'Avenir Next', Verdana, sans-serif; }}
+    .dog-route-app {{ min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }}
+    .route-header-{safe['fingerprint']} {{ padding: clamp(20px, 5vw, 56px); border-bottom: 4px solid var(--ink); background: color-mix(in oklch, var(--accent) 24%, var(--field)); }}
+    .route-header-{safe['fingerprint']} h1 {{ margin: 12px 0 0; font-size: clamp(38px, 8vw, 88px); line-height: .9; letter-spacing: 0; }}
+    .route-board {{ width: min(1180px, calc(100% - 28px)); margin: 0 auto; padding: 24px 0 44px; display: grid; grid-template-columns: 1.1fr .9fr; gap: 24px; }}
+    .route-map {{ min-height: 520px; border: 3px solid var(--ink); border-radius: 8px; background: repeating-linear-gradient(35deg, var(--field), var(--field) 32px, color-mix(in oklch, var(--second) 28%, var(--field)) 33px, color-mix(in oklch, var(--second) 28%, var(--field)) 64px); position: relative; overflow: hidden; }}
+    .route-map::before {{ content: ""; position: absolute; inset: 18% 12%; border: 18px solid var(--accent); border-left-color: transparent; border-radius: 52% 48% 58% 42%; transform: rotate(-11deg); }}
+    .route-pin {{ position: absolute; width: 136px; padding: 12px; border: 2px solid var(--ink); border-radius: 8px; background: oklch(99% .01 90); font-weight: 900; }}
+    .pin-a {{ left: 8%; top: 12%; }} .pin-b {{ right: 10%; top: 44%; }} .pin-c {{ left: 28%; bottom: 10%; }}
+    .dog-itinerary {{ display: grid; gap: 12px; }}
+    .dog-itinerary article {{ padding: 16px; border: 3px solid var(--ink); border-radius: 8px; background: oklch(99% .01 90); }}
+    .dog-itinerary strong {{ display: block; font-size: clamp(26px, 4vw, 48px); line-height: .9; margin-top: 6px; }}
+    .route-actions {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }}
+    .route-actions button {{ border: 2px solid var(--ink); border-radius: 8px; min-height: 48px; background: var(--accent); font: inherit; font-weight: 900; }}
+    #routeResult {{ padding: 14px; border: 2px solid var(--ink); background: var(--path); font-weight: 800; }}
+    @media (max-width: 820px) {{ .route-board, .route-actions {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <main class="dog-route-app" data-project-id="{idea['id']}" data-receipt-no="{safe['receipt']}" data-demo-kind="{safe['kind']}" data-idea-fingerprint="{safe['fingerprint']}">
+    <header class="route-header-{safe['fingerprint']}"><span>{safe['team']} / Dog Route Match</span><h1>{safe['form']}</h1></header>
+    <section class="route-board">
+      <div class="route-map"><div class="route-pin pin-a">起点 18:30</div><div class="route-pin pin-b">饮水点</div><div class="route-pin pin-c">2.4km 回家</div></div>
+      <div class="dog-itinerary">
+        <article><span>匹配对象</span><strong>运动搭子</strong><p>按体型、活动量、遛弯半径生成推荐。</p></article>
+        <article><span>安全提示</span><strong>牵引确认</strong><p>见面前确认疫苗、牵引和场地规则。</p></article>
+        <article><span>体力匹配</span><strong>中高</strong><p>避免精力差太大的宠物被安排在同一次约见。</p></article>
+        <div class="route-actions"><button data-route="已喜欢：加入今晚 18:30 的公园见面候选。">喜欢</button><button data-route="已换路线：从河边慢跑改成社区短途散步。">换路线</button><button data-route="强度已降低：改成 20 分钟轻松散步。">降强度</button></div>
+        <div id="routeResult">选择一个动作查看犬类约见结果。</div>
       </div>
     </section>
   </main>
   <script>
-    function runDemo() {{
-      const value = document.getElementById('demo-input').value || '{safe_idea}';
-      const message = '已把“' + value + '”转换成可展示结果: {safe_form}。';
-      document.getElementById('showcase').textContent = message;
-      document.getElementById('result').textContent = '演示已刷新,评委现在能看到一个真实前端页面。';
-    }}
+    document.querySelectorAll('button[data-route]').forEach((button) => button.onclick = () => document.getElementById('routeResult').textContent = button.dataset.route);
+  </script>
+</body>
+</html>"""
+
+    def _workflow_brief_artifact_html(self, idea, team, title, current_form, plan):
+        safe = self._artifact_common_values(idea, team, title, current_form, plan)
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{safe['title']}</title>
+  <style>
+    :root {{ color-scheme: light; {self._artifact_css_tokens(safe)} --sheet: oklch(99% .006 230); --line: color-mix(in oklch, var(--ink) 22%, transparent); }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; color: var(--ink); background: linear-gradient(180deg, var(--sheet), var(--surface)); font-family: Optima, 'Avenir Next', sans-serif; }}
+    .workflow-brief-app {{ width: min(1220px, calc(100% - 28px)); margin: 0 auto; padding: clamp(20px, 4vw, 46px) 0; }}
+    .briefing-masthead-{safe['fingerprint']} {{ display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: end; padding-bottom: 18px; border-bottom: 4px double var(--ink); }}
+    .briefing-masthead-{safe['fingerprint']} h1 {{ margin: 0; font-size: clamp(34px, 7vw, 78px); line-height: .95; letter-spacing: 0; }}
+    .briefing-columns {{ display: grid; grid-template-columns: .82fr 1.18fr; gap: 20px; margin-top: 22px; }}
+    .transcript-card, .decision-ledger {{ border: 2px solid var(--ink); background: var(--sheet); }}
+    .transcript-card {{ padding: 18px; display: grid; gap: 16px; }}
+    .summary-slice {{ padding: 14px; background: color-mix(in oklch, var(--accent) 18%, var(--sheet)); border-left: 8px solid var(--accent); }}
+    .decision-ledger table {{ width: 100%; border-collapse: collapse; }}
+    .decision-ledger th, .decision-ledger td {{ padding: 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }}
+    .decision-ledger th {{ background: var(--second); }}
+    .briefing-actions {{ display: flex; flex-wrap: wrap; gap: 10px; padding: 14px; }}
+    .briefing-actions button {{ border: 2px solid var(--ink); background: var(--accent); min-height: 44px; padding: 0 14px; font: inherit; font-weight: 900; }}
+    #briefingResult {{ margin: 0 14px 14px; padding: 14px; background: var(--surface); border: 1px solid var(--line); font-weight: 800; }}
+    @media (max-width: 820px) {{ .briefing-masthead-{safe['fingerprint']}, .briefing-columns {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <main class="workflow-brief-app" data-project-id="{idea['id']}" data-receipt-no="{safe['receipt']}" data-demo-kind="{safe['kind']}" data-idea-fingerprint="{safe['fingerprint']}">
+    <header class="briefing-masthead-{safe['fingerprint']}"><h1>{safe['form']}</h1><strong>{safe['receipt']}</strong></header>
+    <section class="briefing-columns">
+      <aside class="transcript-card"><div>{safe['team']} / Brief Ops</div><div class="summary-slice">会议进入系统后直接拆成摘要、行动项、负责人和截止时间。</div><p>输入区保留原始会议上下文，右侧输出可执行跟进表。</p></aside>
+      <section class="decision-ledger">
+        <table><thead><tr><th>类型</th><th>内容</th><th>负责人</th></tr></thead><tbody><tr><td>摘要</td><td>压缩成背景、决定、争议三块。</td><td>系统</td></tr><tr><td>行动项</td><td>整理客户问题清单。</td><td>小林</td></tr><tr><td>邮件</td><td>生成下次会议议程和跟进邮件。</td><td>阿倔</td></tr></tbody></table>
+        <div class="briefing-actions"><button data-briefing="行动项已确认：负责人和截止时间已进入跟进队列。">确认行动项</button><button data-briefing="摘要已重写：保留决定，删除重复讨论。">重写摘要</button></div>
+        <div id="briefingResult">行动项等待确认，确认后会进入跟进队列。</div>
+      </section>
+    </section>
+  </main>
+  <script>
+    document.querySelectorAll('button[data-briefing]').forEach((button) => button.onclick = () => document.getElementById('briefingResult').textContent = button.dataset.briefing);
+  </script>
+</body>
+</html>"""
+
+    def _stage_pitch_artifact_html(self, idea, team, title, current_form, plan):
+        safe = self._artifact_common_values(idea, team, title, current_form, plan)
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{safe['title']}</title>
+  <style>
+    :root {{ color-scheme: light; {self._artifact_css_tokens(safe)} --paper: oklch(98% .012 76); --marker: color-mix(in oklch, var(--accent) 38%, var(--paper)); }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; color: var(--ink); background: linear-gradient(128deg, var(--paper), var(--surface) 54%, var(--second)); font-family: Georgia, 'Times New Roman', serif; }}
+    .stage-pitch-app {{ min-height: 100vh; display: grid; grid-template-columns: minmax(280px, .42fr) minmax(0, .58fr); }}
+    .pitch-timer {{ padding: clamp(24px, 5vw, 58px); border-right: 4px solid var(--ink); background: var(--ink); color: var(--paper); display: grid; align-content: space-between; gap: 24px; }}
+    .pitch-timer h1 {{ margin: 18px 0; font-size: clamp(40px, 7vw, 92px); line-height: .86; letter-spacing: 0; }}
+    .pitch-clock {{ width: min(260px, 70vw); aspect-ratio: 1; border: 12px solid var(--accent); border-radius: 50%; display: grid; place-items: center; color: var(--paper); font-size: clamp(42px, 8vw, 84px); font-weight: 900; }}
+    .pitch-stage {{ padding: clamp(22px, 5vw, 60px); display: grid; gap: 18px; align-content: start; }}
+    .pitch-script-stack {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
+    .pitch-card {{ min-height: 154px; padding: 18px; border: 3px solid var(--ink); background: var(--paper); box-shadow: 8px 8px 0 var(--ink); }}
+    .pitch-card strong {{ display: block; margin-top: 8px; font-size: clamp(28px, 4vw, 54px); line-height: .92; }}
+    .pitch-evidence-wall {{ display: grid; grid-template-columns: 1.3fr .7fr; gap: 14px; }}
+    .pitch-evidence-wall article {{ padding: 18px; border: 2px solid var(--ink); background: var(--marker); }}
+    .pitch-controls {{ display: flex; flex-wrap: wrap; gap: 10px; }}
+    .pitch-controls button {{ min-height: 48px; border: 2px solid var(--ink); border-radius: 4px; background: var(--accent); color: var(--ink); padding: 0 16px; font: inherit; font-weight: 900; cursor: pointer; }}
+    #pitchCue {{ padding: 16px; border: 2px solid var(--ink); background: var(--paper); font-weight: 800; }}
+    @media (max-width: 860px) {{ .stage-pitch-app, .pitch-script-stack, .pitch-evidence-wall {{ grid-template-columns: 1fr; }} .pitch-timer {{ border-right: 0; border-bottom: 4px solid var(--ink); }} }}
+  </style>
+</head>
+<body>
+  <main class="stage-pitch-app" data-project-id="{idea['id']}" data-receipt-no="{safe['receipt']}" data-demo-kind="{safe['kind']}" data-idea-fingerprint="{safe['fingerprint']}">
+    <aside class="pitch-timer">
+      <div><span>{safe['team']} / Stage Pitch</span><h1>{safe['form']}</h1></div>
+      <div class="pitch-clock">3:00</div>
+      <p>把这个 idea 组织成三分钟路演：开场主张、现场证据、评委追问和收束句。</p>
+    </aside>
+    <section class="pitch-stage">
+      <div class="pitch-script-stack">
+        <article class="pitch-card"><span>开场主张</span><strong>先讲痛点</strong><p>用一句话说明为什么现在需要 {safe['idea']}。</p></article>
+        <article class="pitch-card"><span>现场证据</span><strong>可扫码</strong><p>评委打开链接后直接看到当前 HTML 产物。</p></article>
+      </div>
+      <div class="pitch-evidence-wall">
+        <article><h2>评委追问</h2><p>用户是谁、为什么会用、下一版如何验证。</p></article>
+        <article><h2>收束</h2><p>把问题带回第一次体验。</p></article>
+      </div>
+      <div class="pitch-controls">
+        <button type="button" data-pitch="讲稿切换：现在强调用户第一次看到结果的价值。">下一句讲稿</button>
+        <button type="button" data-pitch="问题已记录：下一版补充用户和成本回答。">记录问题</button>
+      </div>
+      <div id="pitchCue">等待切换讲稿或记录评委问题。</div>
+    </section>
+  </main>
+  <script>
+    document.querySelectorAll('button[data-pitch]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        document.getElementById('pitchCue').textContent = button.dataset.pitch;
+      }});
+    }});
+  </script>
+</body>
+</html>"""
+
+    def _market_signal_artifact_html(self, idea, team, title, current_form, plan):
+        safe = self._artifact_common_values(idea, team, title, current_form, plan)
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{safe['title']}</title>
+  <style>
+    :root {{ color-scheme: light; {self._artifact_css_tokens(safe)} --canvas: oklch(97% .018 164); --tile: oklch(99% .006 164); --grid: color-mix(in oklch, var(--ink) 16%, transparent); }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; color: var(--ink); background: linear-gradient(180deg, var(--canvas), var(--surface)); font-family: 'Gill Sans', 'Avenir Next', Verdana, sans-serif; }}
+    .market-signal-app {{ width: min(1240px, calc(100% - 28px)); margin: 0 auto; padding: clamp(20px, 5vw, 56px) 0; }}
+    .signal-hero {{ display: grid; grid-template-columns: .86fr 1.14fr; gap: 18px; align-items: stretch; }}
+    .signal-promise {{ padding: clamp(22px, 4vw, 52px); border: 3px solid var(--ink); background: radial-gradient(circle at 90% 10%, var(--second), transparent 28%), var(--tile); }}
+    .signal-promise h1 {{ margin: 14px 0; font-size: clamp(38px, 7vw, 86px); line-height: .9; letter-spacing: 0; }}
+    .signal-funnel {{ display: grid; grid-template-rows: repeat(4, minmax(76px, auto)); gap: 10px; }}
+    .signal-step {{ padding: 14px 18px; border: 2px solid var(--ink); background: color-mix(in oklch, var(--accent) 20%, var(--tile)); display: flex; justify-content: space-between; align-items: center; gap: 16px; }}
+    .signal-step:nth-child(2) {{ width: 88%; }}
+    .signal-step:nth-child(3) {{ width: 74%; }}
+    .signal-step:nth-child(4) {{ width: 58%; }}
+    .signal-step strong {{ font-size: clamp(28px, 4vw, 54px); line-height: .9; }}
+    .signal-cohort-grid {{ margin-top: 18px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }}
+    .signal-cohort-grid article {{ min-height: 150px; padding: 16px; border: 2px solid var(--ink); background: var(--tile); }}
+    .signal-actions {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }}
+    .signal-actions button {{ min-height: 48px; border: 2px solid var(--ink); border-radius: 999px; background: var(--accent); font: inherit; font-weight: 900; cursor: pointer; }}
+    #signalResult {{ margin-top: 14px; padding: 16px; border: 2px dashed var(--ink); background: var(--tile); font-weight: 800; }}
+    @media (max-width: 860px) {{ .signal-hero, .signal-cohort-grid, .signal-actions {{ grid-template-columns: 1fr; }} .signal-step, .signal-step:nth-child(2), .signal-step:nth-child(3), .signal-step:nth-child(4) {{ width: 100%; }} }}
+  </style>
+</head>
+<body>
+  <main class="market-signal-app" data-project-id="{idea['id']}" data-receipt-no="{safe['receipt']}" data-demo-kind="{safe['kind']}" data-idea-fingerprint="{safe['fingerprint']}">
+    <section class="signal-hero">
+      <div class="signal-promise">
+        <span>{safe['team']} / Market Signal</span>
+        <h1>{safe['form']}</h1>
+        <p>{safe['idea']} 被做成一个市场验证页：先看谁会点、为什么点、点完留下什么信号。</p>
+      </div>
+      <div class="signal-funnel" aria-label="用户验证漏斗">
+        <div class="signal-step"><span>目标用户</span><strong>早期试用</strong></div>
+        <div class="signal-step"><span>首屏承诺</span><strong>30秒懂</strong></div>
+        <div class="signal-step"><span>试用意愿</span><strong>68</strong></div>
+        <div class="signal-step"><span>留资动作</span><strong>12人</strong></div>
+      </div>
+    </section>
+    <section class="signal-cohort-grid">
+      <article><h2>人群</h2><p>把最愿意尝试的人群放在首屏，并保留一句明确收益。</p></article>
+      <article><h2>证据</h2><p>现场输入模拟第一轮信号，避免只停留在口号。</p></article>
+      <article><h2>下一步</h2><p>用户看完后只需要留下联系方式或选择使用场景。</p></article>
+    </section>
+    <div class="signal-actions">
+      <button type="button" data-signal="信号已刷新：首屏会更强调最直接的用户收益。">刷新信号</button>
+      <button type="button" data-signal="反馈已记录：下一版会把留资入口提前。">记录反馈</button>
+    </div>
+    <div id="signalResult">等待刷新用户信号或记录现场反馈。</div>
+  </main>
+  <script>
+    document.querySelectorAll('button[data-signal]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        document.getElementById('signalResult').textContent = button.dataset.signal;
+      }});
+    }});
   </script>
 </body>
 </html>"""
@@ -1189,33 +1418,6 @@ class GameService:
             },
         }
         return plans[kind]
-
-    def _artifact_widget_html(self, plan, safe_form):
-        if plan["kind"] == "cat-match":
-            return f'<div class="pet-card"><span>喵缘指数 92</span><strong>{safe_form}</strong><span>今晚推荐 3 只搭子</span></div>'
-        if plan["kind"] == "workflow-brief":
-            return f'<div class="brief-card"><span>摘要</span><strong>{safe_form}</strong><span>行动项 4 / 风险 1</span></div>'
-        if plan["kind"] == "stage-pitch":
-            return f'<div class="stage-card"><span>路演计时 03:00</span><strong>{safe_form}</strong><span>评委问题预案已生成</span></div>'
-        return f'<div class="market-card"><span>热度 +37%</span><strong>{safe_form}</strong><span>首批用户画像已锁定</span></div>'
-
-    def _artifact_tagline(self, current_form, plan):
-        if plan["kind"] == "cat-match":
-            return f"把“{current_form}”做成宠物社交入口: 先给用户一张能扫码体验的匹配卡。"
-        if plan["kind"] == "workflow-brief":
-            return f"把“{current_form}”做成工作流控制台: 自动提炼摘要、行动项和下一步。"
-        if plan["kind"] == "stage-pitch":
-            return f"把“{current_form}”包装成路演舞台工具: 一屏展示卖点、风险和评委问答。"
-        return f"把“{current_form}”做成市场信号页: 让评委直接看到用户、指标和转化假设。"
-
-    def _artifact_demo_result(self, current_form, plan):
-        if plan["kind"] == "cat-match":
-            return f"核心展示: {current_form} 正在生成推荐理由、匹配标签和聊天开场。"
-        if plan["kind"] == "workflow-brief":
-            return f"核心展示: {current_form} 已整理出摘要、待办、负责人和截止时间。"
-        if plan["kind"] == "stage-pitch":
-            return f"核心展示: {current_form} 已切成舞台讲稿、评委问题和获奖话术。"
-        return f"核心展示: {current_form} 已映射出用户分群、需求强度和首屏卖点。"
 
     def _idea_progress_html(self, idea, artifact):
         team = self._team_row(idea["team_id"]) if idea["team_id"] else None
@@ -1365,10 +1567,10 @@ class GameService:
 
     def _bug_for(self, text, progress):
         if progress >= 80:
-            return f"{text} 的演示按钮只在评委没看时可用"
+            return f"{text} 的演示按钮状态提示还不够清楚"
         if progress >= 40:
-            return f"{text} 的登录页把用户送去泡面角"
-        return f"{text} 的原型会把猫的照片识别成需求文档"
+            return f"{text} 的输入结果还需要更明确的下一步"
+        return f"{text} 的首屏信息层级还需要整理"
 
     def _new_receipt_no(self, edition_no):
         next_id = self.conn.execute("SELECT COUNT(*) FROM ideas").fetchone()[0] + 1

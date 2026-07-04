@@ -253,12 +253,16 @@ class GameServiceTest(unittest.TestCase):
         self.assertIn("text/html", visual_page["contentType"])
         self.assertIn("给猫做相亲App", visual_page["body"])
         self.assertIn("data-project-id", visual_page["body"])
-        self.assertIn("demo-stage", visual_page["body"])
-        self.assertIn("idea-chip", visual_page["body"])
+        self.assertIn("data-idea-fingerprint", visual_page["body"])
+        self.assertIn("cat-match-app", visual_page["body"])
         self.assertIn("linear-gradient", visual_page["body"])
-        self.assertIn("<button", visual_page["body"])
+        self.assertIn("喜欢", visual_page["body"])
+        self.assertNotIn("运行 demo", visual_page["body"])
+        self.assertNotIn("原始 idea", visual_page["body"])
+        self.assertNotIn("AI Hackathon Demo", visual_page["body"])
         self.assertNotIn("完成度", visual_page["body"])
         self.assertNotIn("项目进度", visual_page["body"])
+        self.assertNotIn("猫的照片识别成需求文档", visual_page["body"])
 
     def test_finished_project_does_not_keep_releasing_artifacts(self):
         idea = self.game.submit_idea({"text": "给猫做相亲App"})
@@ -322,28 +326,69 @@ class GameServiceTest(unittest.TestCase):
         self.assertGreaterEqual(len(project["commits"]), 1)
         self.assertIn("html", artifact["contentType"])
         self.assertIn("给猫做相亲App", artifact["body"])
-        self.assertIn("demo-stage", artifact["body"])
+        self.assertIn("data-idea-fingerprint", artifact["body"])
+        self.assertIn("cat-match-app", artifact["body"])
         self.assertIn("linear-gradient", artifact["body"])
-        self.assertIn("<button", artifact["body"])
         self.assertIn("data-project-id", artifact["body"])
+        self.assertNotIn("运行 demo", artifact["body"])
+        self.assertNotIn("原始 idea", artifact["body"])
+        self.assertNotIn("AI Hackathon Demo", artifact["body"])
         self.assertNotIn("完成度", artifact["body"])
+        self.assertNotIn("猫的照片识别成需求文档", artifact["body"])
 
     def test_each_idea_gets_distinct_visual_demo_shape(self):
         first = self.game.submit_idea({"text": "给猫做相亲App"})
         second = self.game.submit_idea({"text": "给会议做总结器"})
+        third = self.game.submit_idea({"text": "给狗做相亲App"})
 
         self.game.tick(now=100)
 
         first_body = self.game.visual_artifact_page(first["ideaId"])["body"]
         second_body = self.game.visual_artifact_page(second["ideaId"])["body"]
+        third_body = self.game.visual_artifact_page(third["ideaId"])["body"]
 
         self.assertIn('data-demo-kind="cat-match"', first_body)
         self.assertIn('data-demo-kind="workflow-brief"', second_body)
-        self.assertIn('class="pet-card"', first_body)
-        self.assertIn('class="brief-card"', second_body)
+        self.assertIn('data-demo-kind="cat-match"', third_body)
+        self.assertIn("data-idea-fingerprint", first_body)
+        self.assertIn("data-idea-fingerprint", second_body)
+        self.assertIn("data-idea-fingerprint", third_body)
+        self.assertIn("喜欢", first_body)
+        self.assertIn("行动项", second_body)
+        self.assertIn("cat-match-app", first_body)
+        self.assertIn("workflow-brief-app", second_body)
+        self.assertIn("dog-route-app", third_body)
         self.assertIn("--accent:", first_body)
         self.assertIn("--accent:", second_body)
+        for shared_shell in ["demo-stage", "idea-chip", "运行 demo", "原始 idea", "class=\"pet-card\"", "class=\"brief-card\""]:
+            self.assertNotIn(shared_shell, first_body)
+            self.assertNotIn(shared_shell, second_body)
+            self.assertNotIn(shared_shell, third_body)
+        self.assertNotIn("猫的照片识别成需求文档", first_body)
+        self.assertNotIn("泡面角", second_body)
         self.assertNotEqual(first_body, second_body)
+        self.assertNotEqual(first_body, third_body)
+        self.assertGreater(abs(len(first_body) - len(third_body)), 250)
+
+    def test_default_artifact_kinds_do_not_share_stage_or_market_shell(self):
+        stage = self.game.submit_idea({"text": "做一个咖啡排队预测"})
+        market = self.game.submit_idea({"text": "做一个预算记账助手"})
+
+        self.game.tick(now=100)
+
+        stage_body = self.game.visual_artifact_page(stage["ideaId"])["body"]
+        market_body = self.game.visual_artifact_page(market["ideaId"])["body"]
+
+        self.assertIn('data-demo-kind="stage-pitch"', stage_body)
+        self.assertIn('data-demo-kind="market-signal"', market_body)
+        self.assertIn("stage-pitch-app", stage_body)
+        self.assertIn("market-signal-app", market_body)
+        self.assertIn("pitch-timer", stage_body)
+        self.assertIn("signal-funnel", market_body)
+        for shared_shell in ["demo-stage", "idea-chip", "运行 demo", "原始 idea", "showcase"]:
+            self.assertNotIn(shared_shell, stage_body)
+            self.assertNotIn(shared_shell, market_body)
+        self.assertNotEqual(stage_body, market_body)
 
     def test_artifact_generation_asks_llm_for_frontend_html(self):
         self.llm.results = [
