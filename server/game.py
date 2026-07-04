@@ -982,6 +982,8 @@ class GameService:
         safe_team = html.escape(team["name"])
         safe_bug = html.escape(bug or "演示数据偶尔会跑偏")
         safe_receipt = html.escape(idea["receipt_no"])
+        safe_tagline = html.escape(self._artifact_tagline(current_form))
+        safe_demo_result = html.escape(self._artifact_demo_result(current_form))
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -989,41 +991,89 @@ class GameService:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{safe_title}</title>
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #f6f8fb; color: #172033; }}
-    main {{ max-width: 760px; margin: 0 auto; padding: 32px 20px; }}
-    .panel {{ background: white; border: 1px solid #d9e0ea; border-radius: 8px; padding: 20px; box-shadow: 0 8px 24px rgba(20, 35, 60, .08); }}
-    .meta {{ color: #5d6b82; font-size: 14px; }}
-    .progress {{ height: 12px; background: #dfe6ef; border-radius: 999px; overflow: hidden; }}
-    .bar {{ width: {int(progress)}%; height: 100%; background: #18a058; }}
-    button {{ border: 0; border-radius: 6px; background: #165dff; color: white; padding: 10px 14px; font-weight: 700; cursor: pointer; }}
-    input {{ width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #c9d3df; border-radius: 6px; margin: 10px 0; }}
-    #result {{ margin-top: 14px; padding: 12px; border-radius: 6px; background: #eef6ff; min-height: 44px; }}
+    :root {{ color-scheme: light; }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: ui-rounded, 'Avenir Next', 'Trebuchet MS', sans-serif;
+      color: #231f20;
+      background:
+        radial-gradient(circle at 12% 12%, #ffe66d 0 11rem, transparent 11.2rem),
+        radial-gradient(circle at 88% 18%, #ff6b6b 0 9rem, transparent 9.2rem),
+        linear-gradient(135deg, #6bf2d5 0%, #f8f3dc 44%, #ffb86b 100%);
+      min-height: 100vh;
+    }}
+    main {{ width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 32px 0; }}
+    .hero {{ display: grid; grid-template-columns: 1.1fr .9fr; gap: 28px; align-items: stretch; min-height: 520px; }}
+    .brand-panel, .demo-stage {{
+      border: 3px solid #231f20;
+      border-radius: 22px;
+      background: rgba(255, 252, 238, .92);
+      box-shadow: 10px 10px 0 #231f20;
+    }}
+    .brand-panel {{ padding: clamp(24px, 5vw, 54px); display: flex; flex-direction: column; justify-content: space-between; }}
+    .idea-chip {{ display: inline-flex; width: fit-content; gap: 8px; align-items: center; padding: 8px 12px; border: 2px solid #231f20; border-radius: 999px; background: #8cffc1; font-weight: 800; }}
+    h1 {{ font-size: clamp(42px, 9vw, 92px); line-height: .9; margin: 30px 0 18px; letter-spacing: 0; }}
+    .tagline {{ font-size: clamp(18px, 3vw, 28px); line-height: 1.25; max-width: 680px; }}
+    .meta-row {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }}
+    .badge {{ padding: 10px 12px; border: 2px solid #231f20; border-radius: 14px; background: #fff; font-weight: 700; }}
+    .demo-stage {{ padding: 22px; display: grid; grid-template-rows: auto 1fr auto; gap: 18px; background: #1f2358; color: #fffbea; }}
+    .screen {{ min-height: 280px; border: 3px solid #fffbea; border-radius: 18px; padding: 18px; background: linear-gradient(160deg, #ff4f7b 0%, #7a5cff 48%, #16d6a4 100%); position: relative; overflow: hidden; }}
+    .screen::after {{ content: ""; position: absolute; width: 180px; height: 180px; right: -42px; top: -42px; border: 18px solid rgba(255, 255, 255, .34); border-radius: 50%; }}
+    .screen h2 {{ margin: 0; font-size: 30px; max-width: 320px; }}
+    .result-card {{ position: absolute; left: 18px; right: 18px; bottom: 18px; padding: 16px; border-radius: 16px; background: rgba(255, 251, 234, .95); color: #231f20; font-weight: 800; }}
+    label {{ font-weight: 800; }}
+    input {{ width: 100%; margin-top: 8px; padding: 14px; border: 3px solid #fffbea; border-radius: 14px; background: #fffbea; color: #231f20; font: inherit; }}
+    button {{ border: 0; border-radius: 999px; background: #ffe66d; color: #231f20; padding: 14px 18px; font-weight: 900; cursor: pointer; box-shadow: 0 5px 0 #000; }}
+    #result {{ margin-top: 12px; min-height: 50px; line-height: 1.45; }}
+    @media (max-width: 760px) {{ .hero {{ grid-template-columns: 1fr; }} .brand-panel, .demo-stage {{ box-shadow: 6px 6px 0 #231f20; }} }}
   </style>
 </head>
 <body>
   <main data-project-id="{idea['id']}" data-receipt-no="{safe_receipt}">
-    <section class="panel">
-      <p class="meta">{safe_team} / {safe_receipt}</p>
-      <h1>{safe_title}</h1>
-      <p>原始 idea: {safe_idea}</p>
-      <p>当前做出来的版本: {safe_form}</p>
-      <div class="progress" aria-label="完成度"><div class="bar"></div></div>
-      <p class="meta">完成度 {int(progress)}% · 当前 bug: {safe_bug}</p>
-      <label>输入一个现场测试用例</label>
-      <input id="demo-input" value="{safe_idea}">
-      <button onclick="runDemo()">运行 demo</button>
-      <div id="result">等待演示。</div>
+    <section class="hero">
+      <div class="brand-panel">
+        <div>
+          <span class="idea-chip">AI Hackathon Demo</span>
+          <h1>{safe_title}</h1>
+          <p class="tagline">{safe_tagline}</p>
+        </div>
+        <div class="meta-row">
+          <span class="badge">{safe_team}</span>
+          <span class="badge">{safe_receipt}</span>
+          <span class="badge">原始 idea: {safe_idea}</span>
+        </div>
+      </div>
+      <div class="demo-stage">
+        <div class="screen">
+          <h2>{safe_form}</h2>
+          <div class="result-card" id="showcase">{safe_demo_result}</div>
+        </div>
+        <div>
+          <label for="demo-input">现场输入</label>
+          <input id="demo-input" value="{safe_idea}">
+          <div id="result">当前演示风险: {safe_bug}</div>
+        </div>
+        <button onclick="runDemo()">运行 demo</button>
+      </div>
     </section>
   </main>
   <script>
     function runDemo() {{
       const value = document.getElementById('demo-input').value || '{safe_idea}';
-      document.getElementById('result').textContent =
-        'AI 团队把“' + value + '”加工成了一个可路演原型: {safe_form}。';
+      const message = '已把“' + value + '”转换成可展示结果: {safe_form}。';
+      document.getElementById('showcase').textContent = message;
+      document.getElementById('result').textContent = '演示已刷新,评委现在能看到一个真实前端页面。';
     }}
   </script>
 </body>
 </html>"""
+
+    def _artifact_tagline(self, current_form):
+        return f"一个围绕“{current_form}”即时做出的彩色前端原型,用于黑客松现场展示、扫码浏览和路演演示。"
+
+    def _artifact_demo_result(self, current_form):
+        return f"核心展示: {current_form} 已生成可交互入口、视觉主张和现场反馈区。"
 
     def _idea_progress_html(self, idea, artifact):
         team = self._team_row(idea["team_id"]) if idea["team_id"] else None

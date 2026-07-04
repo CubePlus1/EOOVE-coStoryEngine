@@ -253,7 +253,11 @@ class GameServiceTest(unittest.TestCase):
         self.assertIn("text/html", visual_page["contentType"])
         self.assertIn("给猫做相亲App", visual_page["body"])
         self.assertIn("data-project-id", visual_page["body"])
+        self.assertIn("demo-stage", visual_page["body"])
+        self.assertIn("idea-chip", visual_page["body"])
+        self.assertIn("linear-gradient", visual_page["body"])
         self.assertIn("<button", visual_page["body"])
+        self.assertNotIn("完成度", visual_page["body"])
         self.assertNotIn("项目进度", visual_page["body"])
 
     def test_finished_project_does_not_keep_releasing_artifacts(self):
@@ -318,8 +322,11 @@ class GameServiceTest(unittest.TestCase):
         self.assertGreaterEqual(len(project["commits"]), 1)
         self.assertIn("html", artifact["contentType"])
         self.assertIn("给猫做相亲App", artifact["body"])
+        self.assertIn("demo-stage", artifact["body"])
+        self.assertIn("linear-gradient", artifact["body"])
         self.assertIn("<button", artifact["body"])
         self.assertIn("data-project-id", artifact["body"])
+        self.assertNotIn("完成度", artifact["body"])
 
     def test_unclaimed_idea_gets_first_reaction_within_next_tick(self):
         idea = self.game.submit_idea({"text": "给评委写借口生成器"})
