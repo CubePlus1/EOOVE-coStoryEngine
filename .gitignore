@@ -5,3 +5,11 @@ npm-debug.log*
 *.tsbuildinfo
 playwright-report/
 test-results/
+__pycache__/
+*.py[cod]
+*.sqlite
+*.sqlite3
+*.db
+.env
+.env.*
+!.env.example

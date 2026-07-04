@@ -1,0 +1,11 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend guideline index for implementation"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Backend layout guidance"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "SQLite persistence guidance"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "API error envelope guidance"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Backend testing and quality guidance"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Logging guidance"}
+{"file": ".trellis/spec/guides/index.md", "reason": "Shared thinking guides index"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "API/database/frontend contract thinking"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse and constants thinking"}
+{"file": ".trellis/tasks/07-04-backend-text-adventure/research/implementation-notes.md", "reason": "Stack and contract notes"}
