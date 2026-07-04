@@ -81,7 +81,8 @@
   - split project tasks across agents,
   - update project progress and bugs,
   - write project commits,
-  - create or update a self-contained HTML artifact,
+  - create or update a self-contained HTML artifact; use LLM `artifact` task
+    HTML when valid, otherwise use a deterministic per-idea fallback demo shape,
   - create conversations/gossip,
   - write agent memories and intents,
   - handle pitch reviews and awards when in those phases.

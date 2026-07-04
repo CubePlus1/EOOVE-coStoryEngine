@@ -328,6 +328,49 @@ class GameServiceTest(unittest.TestCase):
         self.assertIn("data-project-id", artifact["body"])
         self.assertNotIn("完成度", artifact["body"])
 
+    def test_each_idea_gets_distinct_visual_demo_shape(self):
+        first = self.game.submit_idea({"text": "给猫做相亲App"})
+        second = self.game.submit_idea({"text": "给会议做总结器"})
+
+        self.game.tick(now=100)
+
+        first_body = self.game.visual_artifact_page(first["ideaId"])["body"]
+        second_body = self.game.visual_artifact_page(second["ideaId"])["body"]
+
+        self.assertIn('data-demo-kind="cat-match"', first_body)
+        self.assertIn('data-demo-kind="workflow-brief"', second_body)
+        self.assertIn('class="pet-card"', first_body)
+        self.assertIn('class="brief-card"', second_body)
+        self.assertIn("--accent:", first_body)
+        self.assertIn("--accent:", second_body)
+        self.assertNotEqual(first_body, second_body)
+
+    def test_artifact_generation_asks_llm_for_frontend_html(self):
+        self.llm.results = [
+            {
+                "html": (
+                    "<!doctype html><html><body><main data-project-id=\"1\" "
+                    "data-demo-kind=\"llm-v1\">LLM artifact v1</main><button>Run</button></body></html>"
+                )
+            },
+            {
+                "html": (
+                    "<!doctype html><html><body><main data-project-id=\"1\" "
+                    "data-demo-kind=\"llm-v2\">LLM artifact v2</main><button>Run</button></body></html>"
+                )
+            },
+        ]
+        idea = self.game.submit_idea({"text": "给猫做相亲App"})
+
+        self.game.tick(now=100)
+        artifact = self.game.artifact(self.game.idea(idea["ideaId"])["artifact"]["artifactId"])
+
+        artifact_contexts = [context for context in self.llm.contexts if context.get("task") == "artifact"]
+        self.assertTrue(artifact_contexts)
+        self.assertEqual(artifact_contexts[0]["idea"]["text"], "给猫做相亲App")
+        self.assertGreaterEqual(len(artifact_contexts[0]["tasks"]), 3)
+        self.assertIn("LLM artifact v2", artifact["body"])
+
     def test_unclaimed_idea_gets_first_reaction_within_next_tick(self):
         idea = self.game.submit_idea({"text": "给评委写借口生成器"})
 

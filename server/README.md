@@ -76,10 +76,11 @@ Audience flow:
    receive reviews, ranks, certificate print tickets, leaderboard tickets, and
    optional mail notifications.
 
-The backend keeps the demo running without an LLM endpoint. If the LLM is not
-configured or returns malformed output, deterministic fallback still writes
-tasks, commits, HTML artifacts, conversations, memories, intents, project
-updates, and events.
+When `EOOVE_LLM_ENDPOINT` is configured, artifact updates call the LLM with an
+`artifact` task and accept returned self-contained frontend HTML. If the LLM is
+not configured or returns malformed HTML, deterministic fallback still writes
+tasks, commits, distinct per-idea HTML artifacts, conversations, memories,
+intents, project updates, and events.
 
 ## API
 
@@ -172,9 +173,12 @@ GET /artifacts/idea-1.html
 ```
 
 This is the frontend HTML produced for the submitted idea. It is a standalone
-HTML demo served by the backend without Node. Before a team has produced the
-first artifact it shows a lightweight waiting page; after the first project
-tick it returns the current generated demo HTML.
+HTML demo served by the backend without Node. With an LLM endpoint configured,
+the current artifact can be LLM-generated HTML. Without an LLM endpoint, the
+fallback artifact generator still chooses a different demo shape, palette, and
+interaction pattern per idea. Before a team has produced the first artifact it
+shows a lightweight waiting page; after the first project tick it returns the
+current generated demo HTML.
 
 Receipt and certificate QR codes use:
 
