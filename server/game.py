@@ -185,6 +185,20 @@ class GameService:
                 "body": row["body"],
             }
 
+    def idea_page(self, idea_id):
+        with self.lock:
+            idea = self._idea_row(idea_id)
+            artifact = self.conn.execute(
+                "SELECT * FROM artifacts WHERE idea_id = ? ORDER BY version DESC LIMIT 1",
+                (idea["id"],),
+            ).fetchone()
+            if idea["progress"] >= 100 and artifact is not None:
+                return {"contentType": artifact["content_type"], "body": artifact["body"]}
+            return {
+                "contentType": "text/html; charset=utf-8",
+                "body": self._idea_progress_html(idea, artifact),
+            }
+
     def tick(self, now=None):
         if now is None:
             now = int(time.time())
@@ -393,7 +407,12 @@ class GameService:
             if row is None:
                 return None
             payload = json.loads(row["payload_json"])
-            ticket = {"id": row["id"], "kind": row["kind"], "payload": payload, "qrUrl": "/"}
+            ticket = {
+                "id": row["id"],
+                "kind": row["kind"],
+                "payload": payload,
+                "qrUrl": self._ticket_qr_url(payload),
+            }
             try:
                 self.printer_driver.print_ticket(ticket)
             except Exception:
@@ -483,6 +502,8 @@ class GameService:
             "SELECT * FROM ideas WHERE status IN ('developing', 'pivoted') ORDER BY id"
         ).fetchall()
         for idea in ideas:
+            if idea["progress"] >= 100:
+                continue
             increment = 18 if edition["phase"] == "deadline" else 9
             progress = min(100, idea["progress"] + increment)
             bug = self._bug_for(idea["text"], progress)
@@ -991,8 +1012,82 @@ class GameService:
 </body>
 </html>"""
 
-    def _tracking_url(self, idea_id, receipt_no):
-        return f"/idea/{idea_id}?receipt={receipt_no}"
+    def _idea_progress_html(self, idea, artifact):
+        team = self._team_row(idea["team_id"]) if idea["team_id"] else None
+        tasks = self._tasks_for_idea(idea["id"]) if idea["team_id"] else []
+        commits = self._commits_for_idea(idea["id"])
+        safe_idea = html.escape(idea["text"])
+        safe_status = html.escape(idea["status"])
+        safe_team = html.escape(team["name"] if team else "等待 AI 队伍认领")
+        safe_form = html.escape(idea["current_form"])
+        safe_bug = html.escape(idea["current_bug"] or "暂无")
+        safe_receipt = html.escape(idea["receipt_no"])
+        progress = max(0, min(int(idea["progress"]), 100))
+        task_items = "\n".join(
+            f"<li><strong>{html.escape(task['title'])}</strong> "
+            f"<span>{html.escape(task['status'])}</span><p>{html.escape(task.get('output') or '')}</p></li>"
+            for task in tasks
+        ) or "<li><strong>排队中</strong><span>waiting</span><p>AI 黑客正在挑选这个 idea。</p></li>"
+        commit_items = "\n".join(
+            f"<li>{html.escape(commit['agentId'])}: {html.escape(commit['message'])}</li>"
+            for commit in commits[-6:]
+        ) or "<li>还没有提交记录。</li>"
+        artifact_url = html.escape(self._artifact_summary(artifact)["url"]) if artifact else ""
+        artifact_note = (
+            f"<p class=\"meta\">当前临时产物: <code>{artifact_url}</code></p>"
+            if artifact_url else
+            "<p class=\"meta\">最终 HTML 会在进度完成后出现在本页。</p>"
+        )
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="5">
+  <title>{safe_idea} - 项目进度</title>
+  <style>
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f7fb; color: #162033; }}
+    main {{ max-width: 860px; margin: 0 auto; padding: 28px 18px; }}
+    section {{ background: white; border: 1px solid #d9e1ec; border-radius: 8px; padding: 18px; margin: 14px 0; }}
+    h1 {{ font-size: 28px; margin: 8px 0 12px; }}
+    h2 {{ font-size: 18px; margin: 0 0 12px; }}
+    .meta {{ color: #65748b; font-size: 14px; }}
+    .progress {{ height: 14px; background: #dfe6f0; border-radius: 999px; overflow: hidden; }}
+    .bar {{ width: {progress}%; height: 100%; background: #17a36b; }}
+    ul {{ list-style: none; padding: 0; margin: 0; }}
+    li {{ border-top: 1px solid #edf1f6; padding: 10px 0; }}
+    li:first-child {{ border-top: 0; }}
+    li span {{ float: right; color: #165dff; font-size: 13px; }}
+    code {{ background: #eef3f8; border-radius: 4px; padding: 2px 5px; }}
+  </style>
+</head>
+<body>
+  <main data-idea-id="{idea['id']}" data-receipt-no="{safe_receipt}">
+    <p class="meta">收据 {safe_receipt} / 状态 {safe_status}</p>
+    <h1>{safe_idea}</h1>
+    <section>
+      <h2>项目进度</h2>
+      <div class="progress" aria-label="项目进度"><div class="bar"></div></div>
+      <p><strong>{progress}%</strong> / {safe_team}</p>
+      <p>当前形态: {safe_form}</p>
+      <p class="meta">当前 bug: {safe_bug}</p>
+      {artifact_note}
+    </section>
+    <section>
+      <h2>A2A 任务动态</h2>
+      <ul>{task_items}</ul>
+    </section>
+    <section>
+      <h2>提交记录</h2>
+      <ul>{commit_items}</ul>
+    </section>
+  </main>
+</body>
+</html>"""
+
+    def _tracking_url(self, idea_id, receipt_no=None):
+        public_base = get_env("EOOVE_PUBLIC_BASE_URL", "https://eoove.tianmiao.fun").rstrip("/")
+        return f"{public_base}/idea/{idea_id}"
 
     def _idea_row(self, idea_id):
         row = self.conn.execute("SELECT * FROM ideas WHERE id = ?", (idea_id,)).fetchone()
@@ -1138,6 +1233,13 @@ class GameService:
         }
         return bool(whitelist) and email.lower() in whitelist
 
+    def _ticket_qr_url(self, payload):
+        if payload.get("qrUrl"):
+            return payload["qrUrl"]
+        if payload.get("ideaId") is not None:
+            return self._tracking_url(payload["ideaId"])
+        return "/"
+
     def _mail_public(self, row):
         return {
             "id": row["id"],
@@ -1178,6 +1280,9 @@ class AsyncGameService:
 
     def artifact(self, artifact_id):
         return self.game.artifact(artifact_id)
+
+    def idea_page(self, idea_id):
+        return self.game.idea_page(idea_id)
 
     def tick(self, now=None):
         return self.game.tick(now=now)

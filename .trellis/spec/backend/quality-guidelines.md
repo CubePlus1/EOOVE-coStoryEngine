@@ -33,6 +33,9 @@
   - `GET /api/world?after=<eventId> -> { edition, agents, conversations, projects, events }`
   - `GET /api/project/:id -> { projectId, ideaId, receiptNo, teamName, ideaText, currentForm, progress, currentBug, tasks, commits, artifact }`
   - `GET /api/artifact/:id -> { artifactId, ideaId, version, type, title, summary, contentType, body }`
+  - `GET /idea/:id -> text/html`; before completion it renders a
+    backend-owned progress page with A2A task/commit movement, after completion
+    it renders the final artifact HTML.
   - `GET /api/agent/:id -> { card, intent, memories }`
   - `POST /api/host { action: "start"|"skip_phase"|"finale", phase? } -> { edition }`
   - `GET /api/print/pending?limit=<n> -> [{ ticketId, kind, payload }]`
@@ -67,7 +70,9 @@
 - `POST /api/idea` validation is local and must complete before inserting an
   idea or enqueuing a receipt ticket. Accepted ideas get `pooled` status,
   receipt number `E<edition>-I<seq>`, an `idea_received` event, and a `receipt`
-  print ticket.
+  print ticket. Receipt QR URLs must point to
+  `https://eoove.tianmiao.fun/idea/{id}` by default, overridable through
+  `EOOVE_PUBLIC_BASE_URL`.
 - `GET /api/world` uses an event cursor: return events where `id > after`,
   ordered ascending, with each event carrying its `id` and `type`.
 - A tick must keep the simulation moving without an LLM endpoint:
@@ -113,6 +118,8 @@
     pending mail.
 - Production static serving:
   - `python3 -m server.app` serves `/api/*` routes first.
+  - `GET /idea/:id` is served by the backend before SPA fallback so printed QR
+    codes work without Node or a frontend build.
   - Non-API `GET` requests are served from `EOOVE_STATIC_ROOT` (default `dist`).
   - Unknown non-API routes without a file extension fall back to `index.html`
     for the SPA.

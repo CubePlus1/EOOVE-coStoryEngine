@@ -56,6 +56,10 @@ def create_handler(game, static_root=None):
                     return
                 if parsed.path.startswith("/api/"):
                     raise ApiError("NOT_FOUND", "世界没有这条道路。", status=404)
+                if parsed.path.startswith("/idea/"):
+                    idea_id = parsed.path.rsplit("/", 1)[-1]
+                    self._send_html(200, self.service.idea_page(idea_id))
+                    return
                 if self.static_root is not None:
                     self._send_static(parsed.path)
                     return
@@ -127,6 +131,15 @@ def create_handler(game, static_root=None):
             self.send_response(status)
             self._cors_headers()
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_html(self, status, payload):
+            body = payload["body"].encode("utf-8")
+            self.send_response(status)
+            self._cors_headers()
+            self.send_header("Content-Type", payload["contentType"])
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

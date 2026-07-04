@@ -154,6 +154,25 @@ Response:
 Idea status values include `pooled`, `developing`, `pivoted`, `presented`,
 `awarded`, and `carried_over`.
 
+### Idea Demo Page
+
+```http
+GET /idea/1
+```
+
+This backend-rendered HTML page is the URL encoded in receipt QR codes. Before
+the project is complete it shows the idea status, team, progress bar, A2A task
+movement, commits, and the current temporary artifact link if one exists. Once
+progress reaches 100, the same route returns the final self-contained HTML demo.
+
+Receipt and certificate QR codes use:
+
+```text
+https://eoove.tianmiao.fun/idea/{id}
+```
+
+Override the public host with `EOOVE_PUBLIC_BASE_URL` for non-production demos.
+
 ### World Stream
 
 ```http
@@ -395,7 +414,7 @@ Response:
       "investorName": "七色",
       "editionNo": 1,
       "trackingId": "E01-I0001",
-      "qrUrl": "/idea/1?receipt=E01-I0001"
+      "qrUrl": "https://eoove.tianmiao.fun/idea/1"
     }
   }
 ]

@@ -228,8 +228,43 @@ class GameServiceTest(unittest.TestCase):
         self.assertEqual(dict(idea), {"text": "给猫做相亲App", "investor_name": "七色", "status": "pooled"})
         payload = json.loads(self.query_value("SELECT payload_json FROM print_queue WHERE kind = 'receipt'"))
         self.assertEqual(payload["idea"], "给猫做相亲App")
-        self.assertIn(f"/idea/{result['ideaId']}?receipt={result['receiptNo']}", payload["qrUrl"])
+        self.assertEqual(payload["qrUrl"], f"https://eoove.tianmiao.fun/idea/{result['ideaId']}")
         self.assertEqual(payload["trackingId"], result["receiptNo"])
+
+    def test_idea_page_shows_progress_then_final_artifact(self):
+        idea = self.game.submit_idea({"text": "给猫做相亲App"})
+
+        progress_page = self.game.idea_page(idea["ideaId"])
+
+        self.assertIn("text/html", progress_page["contentType"])
+        self.assertIn("给猫做相亲App", progress_page["body"])
+        self.assertIn("项目进度", progress_page["body"])
+        self.assertIn("0%", progress_page["body"])
+
+        for offset in range(20):
+            self.game.tick(now=100 + offset)
+
+        final_page = self.game.idea_page(idea["ideaId"])
+
+        self.assertIn("text/html", final_page["contentType"])
+        self.assertIn("给猫做相亲App", final_page["body"])
+        self.assertIn("data-project-id", final_page["body"])
+        self.assertIn("<button", final_page["body"])
+        self.assertNotIn("项目进度", final_page["body"])
+
+    def test_finished_project_does_not_keep_releasing_artifacts(self):
+        idea = self.game.submit_idea({"text": "给猫做相亲App"})
+        for offset in range(20):
+            self.game.tick(now=100 + offset)
+        finished_version = self.game.idea(idea["ideaId"])["artifact"]["version"]
+        finished_commits = self.query_value("SELECT COUNT(*) FROM project_commits")
+
+        self.game.tick(now=200)
+        self.game.tick(now=201)
+
+        self.assertEqual(self.game.idea(idea["ideaId"])["progress"], 100)
+        self.assertEqual(self.game.idea(idea["ideaId"])["artifact"]["version"], finished_version)
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM project_commits"), finished_commits)
 
     def test_idea_validation_rejects_sensitive_or_long_text_without_mutation(self):
         with self.assertRaises(ApiError) as raised:
@@ -354,6 +389,20 @@ class GameServiceTest(unittest.TestCase):
 
         self.assertEqual(first["status"], "pending")
         self.assertEqual(second["status"], "printed")
+        self.assertEqual(
+            printer.printed[0]["qrUrl"],
+            f"https://eoove.tianmiao.fun/idea/{printer.printed[0]['payload']['ideaId']}",
+        )
+
+    def test_process_print_job_without_idea_keeps_neutral_qr_url(self):
+        printer = FakePrinterDriver()
+        game = GameService(self.db_path, printer_driver=printer)
+        game._enqueue_print("leaderboard", {"editionNo": 1, "awards": []})
+
+        result = game.process_next_print_job()
+
+        self.assertEqual(result["status"], "printed")
+        self.assertEqual(printer.printed[0]["qrUrl"], "/")
 
     def test_reset_requires_confirmation_and_starts_fresh_edition(self):
         self.game.submit_idea({"text": "给猫做相亲App"})
@@ -402,6 +451,16 @@ class HttpContractTest(unittest.TestCase):
         parsed = json.loads(data.decode("utf-8")) if data else None
         return response.status, parsed
 
+    def request_raw(self, method, path):
+        host, port = self.server.server_address
+        conn = HTTPConnection(host, port, timeout=2)
+        conn.request(method, path)
+        response = conn.getresponse()
+        data = response.read().decode("utf-8")
+        content_type = response.getheader("Content-Type")
+        conn.close()
+        return response.status, content_type, data
+
     def test_http_idea_world_agent_host_and_print_contract(self):
         status, idea = self.request("POST", "/api/idea", {"text": "给猫做相亲App", "investorName": "七色"})
         self.assertEqual(status, 200)
@@ -410,6 +469,12 @@ class HttpContractTest(unittest.TestCase):
         status, tracked = self.request("GET", f"/api/idea/{idea['ideaId']}")
         self.assertEqual(status, 200)
         self.assertEqual(tracked["status"], "pooled")
+
+        status, content_type, body = self.request_raw("GET", f"/idea/{idea['ideaId']}")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", content_type)
+        self.assertIn("项目进度", body)
+        self.assertIn("给猫做相亲App", body)
 
         self.game.tick(now=100)
         status, world = self.request("GET", "/api/world?after=0")
@@ -430,6 +495,13 @@ class HttpContractTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("text/html", artifact["contentType"])
         self.assertIn("给猫做相亲App", artifact["body"])
+
+        for offset in range(20):
+            self.game.tick(now=200 + offset)
+        status, content_type, body = self.request_raw("GET", f"/idea/{idea['ideaId']}")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", content_type)
+        self.assertIn("data-project-id", body)
 
         status, host = self.request("POST", "/api/host", {"action": "skip_phase", "phase": "pitch"})
         self.assertEqual(status, 200)

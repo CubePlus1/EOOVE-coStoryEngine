@@ -16,12 +16,18 @@ def main():
     parser.add_argument("--email", default="", help="Optional investor email.")
     parser.add_argument("--interval", type=float, default=2.0, help="Polling interval seconds.")
     parser.add_argument("--fast", action="store_true", help="Set beatIntervalSeconds=1 before watching.")
+    parser.add_argument(
+        "--public-base",
+        default="https://eoove.tianmiao.fun",
+        help="Public base URL printed on receipt QR codes.",
+    )
     parser.add_argument("--no-submit", type=int, metavar="IDEA_ID", help="Watch an existing idea id.")
     parser.add_argument("--reset", action="store_true", help="Reset story before submitting.")
     parser.add_argument("--history", action="store_true", help="Also print events that existed before this run.")
     args = parser.parse_args()
 
     base = args.base.rstrip("/")
+    public_base = args.public_base.rstrip("/")
     if args.reset:
         post_json(base, "/api/admin/reset", {"confirm": "RESET"})
         print("[admin] reset ok")
@@ -50,6 +56,8 @@ def main():
         receipt_no = accepted["receiptNo"]
         print(f"[idea] accepted ideaId={idea_id} receiptNo={receipt_no}")
 
+    print(f"[page] local={base}/idea/{idea_id}")
+    print(f"[qr] print={public_base}/idea/{idea_id}")
     print(f"[watch] base={base} ideaId={idea_id} receiptNo={receipt_no}")
     print("[watch] Ctrl-C to stop\n")
 
@@ -77,6 +85,8 @@ def main():
                     f"[idea] status={tracked.get('status')} team={tracked.get('teamName')} "
                     f"progress={tracked.get('progress')} bug={tracked.get('currentBug')}"
                 )
+                if int(tracked.get("progress") or 0) >= 100:
+                    print(f"[page] final artifact is now visible at {base}/idea/{idea_id}")
                 if tracked.get("gossip"):
                     print(f"[gossip] {tracked['gossip'][0]}")
 
