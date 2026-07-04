@@ -23,6 +23,11 @@ import {
   submitMockAct,
   tickMockWorld,
 } from './mock/story';
+import {
+  getLocationStorySections,
+  getMobileStoryEntries,
+  getPersonalStoryEntries,
+} from './view-model/storyEntries';
 
 type ViewMode = 'phone' | 'wall' | 'card';
 type PhonePhase = 'gate' | 'join' | 'reveal' | 'world';
@@ -66,14 +71,10 @@ export function App() {
 
   const me = story.characters.find((character) => character.charId === currentCharId) ?? story.characters[0];
   const myLocation = story.locations.find((location) => location.id === me.location) ?? story.locations[0];
-  const myActs = story.acts.filter((act) => act.involved.includes(currentCharId) || act.location === me.location).slice(-6);
+  const worldEntries = useMemo(() => getMobileStoryEntries(story), [story]);
+  const personalEntries = useMemo(() => getPersonalStoryEntries(story, currentCharId, me.location), [story, me.location]);
   const progress = Math.round((story.world.round / story.world.maxRound) * 100);
-  const groupedActs = useMemo(() => {
-    return story.locations.map((location) => ({
-      location,
-      acts: story.acts.filter((act) => act.location === location.id).slice(-4),
-    }));
-  }, [story]);
+  const storySections = useMemo(() => getLocationStorySections(story), [story]);
 
   function switchView(nextView: ViewMode) {
     setView(nextView);
@@ -150,7 +151,7 @@ export function App() {
           >
             <WallHeader story={story} progress={progress} />
             <section className="location-grid">
-              {groupedActs.map(({ location, acts }, index) => (
+              {storySections.map(({ location, entries }, index) => (
                 <motion.article
                   className="location-panel"
                   key={location.id}
@@ -164,16 +165,16 @@ export function App() {
                   </div>
                   <p className="directive">{location.directive.hint}</p>
                   <div className="typewriter-list">
-                    {acts.map((act) => (
+                    {entries.map((entry) => (
                       <motion.div
-                        className={`act-line ${act.type}`}
-                        key={act.id}
+                        className={`act-line ${entry.type}`}
+                        key={entry.id}
                         layout
                         initial={{ opacity: 0, x: 18 }}
                         animate={{ opacity: 1, x: 0 }}
                       >
-                        <strong>第{act.round}轮</strong>
-                        <p>{act.narrative}</p>
+                        <strong>{entry.title}</strong>
+                        <p>{entry.text}</p>
                       </motion.div>
                     ))}
                   </div>
@@ -274,10 +275,10 @@ export function App() {
                       </button>
                     </div>
                     <div className="mobile-feed">
-                      {(tab === 'world' ? story.acts.slice(-7) : myActs).map((act) => (
-                        <article className="feed-item" key={`${tab}-${act.id}`}>
-                          <strong>{act.chronicle}</strong>
-                          <p>{act.narrative}</p>
+                      {(tab === 'world' ? worldEntries : personalEntries).map((entry) => (
+                        <article className="feed-item" key={`${tab}-${entry.id}`}>
+                          <strong>{entry.chronicle}</strong>
+                          <p>{entry.text}</p>
                         </article>
                       ))}
                     </div>
