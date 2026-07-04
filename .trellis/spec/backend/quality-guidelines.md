@@ -63,10 +63,17 @@
   - Simulated mail rows are retained as `simulated` and must not block later pending mail.
 - Environment keys:
   - `EOOVE_HOST`, `EOOVE_PORT`, `EOOVE_DB_PATH`
+  - `EOOVE_STATIC_ROOT` for the built frontend directory served by `server.app`
   - `EOOVE_LLM_ENDPOINT`, `EOOVE_LLM_API_KEY`, `EOOVE_LLM_MODEL`
   - `MAIL_WHITELIST`
   - `EOOVE_SMTP_HOST`, `EOOVE_SMTP_PORT`, `EOOVE_SMTP_USERNAME`, `EOOVE_SMTP_PASSWORD`, `EOOVE_MAIL_FROM`, `EOOVE_SMTP_TLS`
   - `EOOVE_PRINTER_COMMAND`, `EOOVE_PRINTER_TIMEOUT`
+- Production static serving:
+  - `python3 -m server.app` serves `/api/*` routes first.
+  - Non-API `GET` requests are served from `EOOVE_STATIC_ROOT` (default `dist`).
+  - Unknown non-API routes without a file extension fall back to `index.html` for the SPA.
+  - Unknown `/api/*` routes must stay JSON `NOT_FOUND`; never return `index.html`.
+  - Missing static assets with a file extension (for example `/assets/missing.js`) must return JSON `NOT_FOUND`, not `index.html`.
 
 ### 4. Validation & Error Matrix
 
@@ -78,6 +85,8 @@
 - Admin reset without exact `RESET` confirmation -> `REJECTED`.
 - Admin beat interval outside 1..3600 seconds -> `REJECTED`.
 - LLM timeout or malformed weaver output -> deterministic fallback; keep the pipeline unblocked.
+- Unknown `GET /api/*` route -> HTTP 404 `NOT_FOUND` JSON envelope even when static serving is enabled.
+- Missing static asset with a file extension -> HTTP 404 `NOT_FOUND`; unknown SPA route without extension -> `index.html`.
 
 ### 5. Good/Base/Bad Cases
 
@@ -102,6 +111,7 @@
   - print/mail failure retry.
 - Async production wrapper tests for behavior that differs from synchronous `GameService`.
 - Demo hardening tests must assert rejected requests do not mutate world state.
+- Static serving tests must assert `/` and real assets are served from `dist`, unknown SPA routes fall back to `index.html`, unknown `/api/*` routes return JSON `NOT_FOUND`, and missing assets do not fall back to `index.html`.
 
 ### 7. Wrong vs Correct
 

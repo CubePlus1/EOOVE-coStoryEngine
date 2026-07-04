@@ -497,6 +497,82 @@ class HttpContractTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(reset["reset"], True)
 
+    def test_unknown_get_api_route_returns_json_not_found(self):
+        status, rejected = self.request("GET", "/api/missing")
+        self.assertEqual(status, 404)
+        self.assertEqual(rejected["error"]["code"], "NOT_FOUND")
+
+
+class StaticFileTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.dist = self.root / "dist"
+        self.dist.mkdir()
+        (self.dist / "index.html").write_text(
+            '<!doctype html><div id="root"></div><script src="/assets/app.js"></script>',
+            encoding="utf-8",
+        )
+        assets = self.dist / "assets"
+        assets.mkdir()
+        (assets / "app.js").write_text("console.log('eoove')", encoding="utf-8")
+        self.db_path = str(self.root / "game.sqlite")
+        self.game = GameService(self.db_path)
+        handler = create_handler(self.game, static_root=self.dist)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join(timeout=2)
+        self.server.server_close()
+        self.game.close()
+        self.tmp.cleanup()
+
+    def raw_request(self, path):
+        host, port = self.server.server_address
+        conn = HTTPConnection(host, port, timeout=2)
+        conn.request("GET", path)
+        response = conn.getresponse()
+        data = response.read()
+        headers = dict(response.getheaders())
+        conn.close()
+        return response.status, headers, data
+
+    def request(self, path):
+        status, _headers, data = self.raw_request(path)
+        parsed = json.loads(data.decode("utf-8")) if data else None
+        return status, parsed
+
+    def test_serves_index_and_static_assets_from_dist(self):
+        status, headers, data = self.raw_request("/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers["Content-Type"])
+        self.assertIn(b'id="root"', data)
+
+        status, headers, data = self.raw_request("/assets/app.js")
+        self.assertEqual(status, 200)
+        self.assertIn("javascript", headers["Content-Type"])
+        self.assertEqual(data, b"console.log('eoove')")
+
+    def test_unknown_frontend_route_falls_back_to_index(self):
+        status, headers, data = self.raw_request("/admin/live")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers["Content-Type"])
+        self.assertIn(b'id="root"', data)
+
+    def test_missing_static_asset_returns_not_found(self):
+        status, headers, data = self.raw_request("/assets/missing.js")
+        self.assertEqual(status, 404)
+        self.assertIn("application/json", headers["Content-Type"])
+        self.assertEqual(json.loads(data.decode("utf-8"))["error"]["code"], "NOT_FOUND")
+
+    def test_unknown_api_route_returns_json_not_static_index(self):
+        status, rejected = self.request("/api/missing")
+        self.assertEqual(status, 404)
+        self.assertEqual(rejected["error"]["code"], "NOT_FOUND")
+
 
 class RuntimeTest(unittest.TestCase):
     def test_background_runtime_processes_print_and_beats_until_stopped(self):

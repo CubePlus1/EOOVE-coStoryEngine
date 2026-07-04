@@ -1,5 +1,7 @@
 import json
+import mimetypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .config import get_env, get_int_env
@@ -8,9 +10,12 @@ from .rate_limit import RateLimiter
 from .runtime import BackgroundRuntime, WeaveWorkerRuntime
 
 
-def create_handler(game):
+def create_handler(game, static_root=None):
+    root = Path(static_root).resolve() if static_root is not None else None
+
     class GameRequestHandler(BaseHTTPRequestHandler):
         service = game
+        static_root = root
         max_body_bytes = 16 * 1024
         rate_limiter = RateLimiter()
 
@@ -38,6 +43,11 @@ def create_handler(game):
                 if parsed.path.startswith("/api/card/"):
                     char_id = parsed.path.rsplit("/", 1)[-1]
                     self._send_json(200, self.service.card(char_id))
+                    return
+                if parsed.path.startswith("/api/"):
+                    raise ApiError("NOT_FOUND", "世界没有这条道路。", status=404)
+                if self.static_root is not None:
+                    self._send_static(parsed.path)
                     return
                 raise ApiError("NOT_FOUND", "世界没有这条道路。", status=404)
             except ApiError as error:
@@ -108,6 +118,33 @@ def create_handler(game):
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_static(self, request_path):
+            target = self._static_target(request_path)
+            if target is None:
+                raise ApiError("NOT_FOUND", "世界没有这条道路。", status=404)
+            body = target.read_bytes()
+            content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _static_target(self, request_path):
+            if self.static_root is None:
+                return None
+            relative = request_path.lstrip("/") or "index.html"
+            candidate = (self.static_root / relative).resolve()
+            if candidate.is_file() and candidate.is_relative_to(self.static_root):
+                return candidate
+            if Path(relative).suffix:
+                return None
+            index = self.static_root / "index.html"
+            if index.is_file():
+                return index
+            return None
+
         def _cors_headers(self):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -120,11 +157,12 @@ def run(host=None, port=None, db_path=None):
     host = host or get_env("EOOVE_HOST", "127.0.0.1")
     port = port or get_int_env("EOOVE_PORT", 8000)
     db_path = db_path or get_env("EOOVE_DB_PATH", "server/db.sqlite")
+    static_root = get_env("EOOVE_STATIC_ROOT", "dist")
     game = GameService(db_path)
     background_runtime = BackgroundRuntime(game)
     weave_runtime = WeaveWorkerRuntime(game)
     service = AsyncGameService(game, weave_runtime)
-    server = ThreadingHTTPServer((host, port), create_handler(service))
+    server = ThreadingHTTPServer((host, port), create_handler(service, static_root=static_root))
     background_runtime.start()
     weave_runtime.start()
     try:
