@@ -17,26 +17,23 @@ from server.printer import CommandPrinterDriver
 class FakeLlmGateway:
     def __init__(self):
         self.configured = True
-        self.story_results = []
+        self.results = []
         self.contexts = []
 
     def generate_character(self, self_desc):
         return None
 
     def moderate(self, payload):
-        raise AssertionError("v3 join moderation must stay local")
+        raise AssertionError("v4 idea moderation must stay local")
 
     def weave(self, context):
         self.contexts.append(context)
-        if self.story_results:
-            result = self.story_results.pop(0)
+        if self.results:
+            result = self.results.pop(0)
             if isinstance(result, Exception):
                 raise result
             return result
         return None
-
-    def generate_ending(self, character, world):
-        return {"ending": f"{character['name']}把自己的结局折进维修报告背面。"}
 
 
 class FakeMailTransport:
@@ -79,7 +76,7 @@ class LlmGatewayTest(unittest.TestCase):
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", "0"))
                 received.append(json.loads(self.rfile.read(length).decode("utf-8")))
-                body = json.dumps({"result": {"name": "风暴记录员"}}).encode("utf-8")
+                body = json.dumps({"result": {"ok": True}}).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -96,10 +93,10 @@ class LlmGatewayTest(unittest.TestCase):
             host, port = server.server_address
             gateway = HttpJsonLlmGateway(endpoint=f"http://{host}:{port}")
 
-            result = gateway.generate_character("追雷的人")
+            result = gateway.weave({"task": "conversation"})
 
-            self.assertEqual(result["name"], "风暴记录员")
-            self.assertEqual(received[0]["task"], "character")
+            self.assertEqual(result, {"ok": True})
+            self.assertEqual(received[0]["task"], "weaver")
             self.assertEqual(received[0]["model"], "gpt-5.4-mini")
             self.assertNotIn("thinking", received[0])
             self.assertNotIn("reasoning", received[0])
@@ -134,7 +131,7 @@ class LlmGatewayTest(unittest.TestCase):
             host, port = server.server_address
             gateway = HttpJsonLlmGateway(endpoint=f"http://{host}:{port}")
 
-            result = gateway.weave({"world": {"phase": "running", "repairCount": 0}})
+            result = gateway.weave({"task": "pitch"})
 
             self.assertEqual(result, {"ok": True})
             self.assertEqual(received[0]["model"], "custom-fast-model")
@@ -156,11 +153,11 @@ class PrinterDriverTest(unittest.TestCase):
             output = Path(tmp) / "ticket.json"
             driver = CommandPrinterDriver(command=f"cat > {output}", timeout=1)
 
-            result = driver.print_ticket({"kind": "charcard", "payload": {"name": "灯塔守夜人"}})
+            result = driver.print_ticket({"kind": "receipt", "payload": {"idea": "猫相亲"}})
 
             self.assertEqual(result["returncode"], 0)
             written = json.loads(output.read_text(encoding="utf-8"))
-            self.assertEqual(written["payload"]["name"], "灯塔守夜人")
+            self.assertEqual(written["payload"]["idea"], "猫相亲")
 
 
 class GameServiceTest(unittest.TestCase):
@@ -168,7 +165,8 @@ class GameServiceTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / "game.sqlite")
         self.llm = FakeLlmGateway()
-        self.game = GameService(self.db_path, llm=self.llm)
+        self.mail = FakeMailTransport()
+        self.game = GameService(self.db_path, llm=self.llm, mail_transport=self.mail)
 
     def tearDown(self):
         self.game.close()
@@ -183,107 +181,148 @@ class GameServiceTest(unittest.TestCase):
         row = self.query_one(sql, params)
         return None if row is None else row[0]
 
-    def test_initializes_v3_schema(self):
-        world = self.query_one("SELECT phase, repair_count, finale_target FROM world WHERE id = 1")
+    def test_initializes_v4_schema_and_first_edition(self):
+        edition = self.query_one("SELECT no, phase FROM editions WHERE id = 1")
 
-        self.assertEqual(dict(world), {"phase": "running", "repair_count": 0, "finale_target": 10})
-        columns = {row["name"] for row in self.game.conn.execute("PRAGMA table_info(world)").fetchall()}
-        self.assertEqual(columns, {"id", "phase", "repair_count", "finale_target"})
-        self.assertIsNone(self.query_value("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'acts'"))
-        self.assertIsNotNone(self.query_value("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rules'"))
-        self.assertIsNotNone(self.query_value("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'stories'"))
-        self.assertIsNotNone(self.query_value("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'batches'"))
-        self.assertGreaterEqual(self.query_value("SELECT COUNT(*) FROM templates"), 50)
+        self.assertEqual(dict(edition), {"no": 1, "phase": "opening"})
+        for table in [
+            "agents",
+            "teams",
+            "ideas",
+            "memories",
+            "conversations",
+            "events",
+            "print_queue",
+            "mail_queue",
+        ]:
+            self.assertIsNotNone(self.query_value(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ))
+        self.assertIsNone(self.query_value("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'characters'"))
+        self.assertGreaterEqual(self.query_value("SELECT COUNT(*) FROM agents WHERE role = 'hacker'"), 9)
+        self.assertGreaterEqual(self.query_value("SELECT COUNT(*) FROM agents WHERE role = 'judge'"), 2)
 
-    def test_join_returns_batch_contract_and_prints_charcard(self):
-        template = self.game.template()
-
-        joined = self.game.join({
-            "templateId": template["templateId"],
-            "edits": {"name": "铜锅侠", "tagSwap": template["tagOptions"][-1]},
-            "origin": "赛博大唐",
-            "quirk": "会给螺丝念诗",
+    def test_submit_idea_returns_receipt_and_prints_receipt_ticket(self):
+        result = self.game.submit_idea({
+            "text": "给猫做相亲App",
+            "investorName": "七色",
             "email": "hero@example.com",
         })
 
-        self.assertEqual(set(joined), {"charId", "batchId", "etaSeconds", "name", "profile", "origin", "quirk"})
-        self.assertRegex(joined["batchId"], r"^b_[0-9a-f]{8}$")
-        self.assertEqual(joined["etaSeconds"], 45)
-        self.assertEqual(joined["origin"], "赛博大唐")
-        self.assertEqual(joined["quirk"], "会给螺丝念诗")
-        batch = self.game.batch(joined["batchId"], now=0)
-        self.assertEqual(batch["status"], "gathering")
-        self.assertEqual(batch["members"][0]["name"], "铜锅侠")
-        self.assertEqual(batch["members"][0]["type"], "human")
-        self.assertEqual(self.query_value("SELECT kind FROM print_queue ORDER BY id LIMIT 1"), "charcard")
+        self.assertEqual(set(result), {"ideaId", "receiptNo"})
+        self.assertRegex(result["receiptNo"], r"^E01-I[0-9]{4}$")
+        idea = self.query_one("SELECT text, investor_name, status FROM ideas WHERE id = ?", (result["ideaId"],))
+        self.assertEqual(dict(idea), {"text": "给猫做相亲App", "investor_name": "七色", "status": "pooled"})
+        payload = json.loads(self.query_value("SELECT payload_json FROM print_queue WHERE kind = 'receipt'"))
+        self.assertEqual(payload["idea"], "给猫做相亲App")
 
-    def test_three_humans_auto_weave_one_story_and_rule(self):
-        joined = [
-            self.game.join({"templateId": self.game.template()["templateId"], "edits": {"name": name}})
-            for name in ["甲", "乙", "丙"]
-        ]
+    def test_idea_validation_rejects_sensitive_or_long_text_without_mutation(self):
+        with self.assertRaises(ApiError) as raised:
+            self.game.submit_idea({"text": "毁灭全世界"})
 
-        batch = self.game.batch(joined[0]["batchId"], now=10)
-        story = self.game.story(after=0)
+        self.assertEqual(raised.exception.code, "REJECTED")
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM ideas"), 0)
 
-        self.assertEqual(batch["status"], "done")
-        self.assertEqual(batch["storyId"], 1)
-        self.assertEqual(story["world"], {"phase": "running", "repairCount": 1, "finaleTarget": 10})
-        self.assertEqual(len(story["rules"]), 1)
-        self.assertEqual(len(story["stories"]), 1)
-        self.assertEqual(story["stories"][0]["members"][0]["type"], "human")
-        self.assertIn("rule", story["stories"][0])
-        self.assertEqual(self.query_value("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'acts'"), None)
-        self.assertIn("rules", self.llm.contexts[-1])
-        self.assertEqual(len(self.llm.contexts[-1]["members"]), 3)
-        report = self.query_one("SELECT kind, payload_json FROM print_queue WHERE kind = 'report'")
-        self.assertIsNotNone(report)
-        self.assertIn("rule", json.loads(report["payload_json"]))
+        with self.assertRaises(ApiError):
+            self.game.submit_idea({"text": "这是一条明确超过三十个字的黑客松点子用于测试长度限制必须被系统拒绝"})
 
-    def test_timeout_fills_ai_residents_to_three(self):
-        joined = self.game.join({"templateId": self.game.template()["templateId"], "edits": {"name": "独行者"}})
-        deadline = self.query_value("SELECT deadline_at FROM batches WHERE id = ?", (joined["batchId"],))
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM ideas"), 0)
 
-        batch = self.game.batch(joined["batchId"], now=deadline)
+    def test_tick_claims_idea_generates_conversation_memories_and_events(self):
+        idea = self.game.submit_idea({"text": "给猫做相亲App", "investorName": "七色"})
 
-        self.assertEqual(batch["status"], "done")
-        members = json.loads(self.query_value("SELECT members_json FROM stories WHERE id = ?", (batch["storyId"],)))
-        self.assertEqual(len(members), 3)
-        self.assertEqual([member["type"] for member in members].count("ai"), 2)
+        tick = self.game.tick(now=100)
+        world = self.game.world(after=0)
 
-    def test_story_after_uses_story_id_cursor(self):
-        for name in ["甲", "乙", "丙"]:
-            self.game.join({"templateId": self.game.template()["templateId"], "edits": {"name": name}})
+        tracked = self.game.idea(idea["ideaId"])
+        self.assertEqual(tick["advanced"], True)
+        self.assertEqual(tracked["status"], "developing")
+        self.assertIsNotNone(tracked["teamName"])
+        self.assertGreater(tracked["progress"], 0)
+        self.assertTrue(tracked["gossip"])
+        self.assertGreaterEqual(len(world["conversations"]), 1)
+        self.assertGreaterEqual(len(world["events"]), 2)
+        self.assertGreaterEqual(self.query_value("SELECT COUNT(*) FROM memories"), 2)
+        self.assertEqual(self.llm.contexts[-1]["task"], "conversation")
+        self.assertIn("memories", self.llm.contexts[-1]["agents"][0])
 
-        full = self.game.story(after=0)
-        incremental = self.game.story(after=full["stories"][0]["id"])
+    def test_unclaimed_idea_gets_first_reaction_within_next_tick(self):
+        idea = self.game.submit_idea({"text": "给评委写借口生成器"})
 
-        self.assertEqual(len(full["stories"]), 1)
-        self.assertEqual(incremental["stories"], [])
-        self.assertEqual(len(incremental["rules"]), 1)
-        self.assertNotIn("acts", incremental)
+        self.game.tick(now=100)
+        tracked = self.game.idea(idea["ideaId"])
+
+        self.assertTrue(any("提到" in item or "听说" in item for item in tracked["gossip"]))
+
+    def test_host_skip_phase_pitch_and_award_generate_certificate_and_mail(self):
+        previous_whitelist = os.environ.get("MAIL_WHITELIST")
+        os.environ["MAIL_WHITELIST"] = "hero@example.com"
+        try:
+            idea = self.game.submit_idea({
+                "text": "给猫做相亲App",
+                "investorName": "七色",
+                "email": "hero@example.com",
+            })
+            self.game.tick(now=100)
+
+            self.game.host({"action": "skip_phase", "phase": "pitch"})
+            self.game.tick(now=200)
+            self.game.host({"action": "skip_phase", "phase": "awards"})
+            self.game.tick(now=300)
+
+            tracked = self.game.idea(idea["ideaId"])
+            self.assertEqual(tracked["status"], "awarded")
+            self.assertIsNotNone(tracked["review"])
+            self.assertIsNotNone(tracked["rank"])
+            kinds = [row["kind"] for row in self.game.conn.execute("SELECT kind FROM print_queue ORDER BY id")]
+            self.assertIn("certificate", kinds)
+            self.assertIn("leaderboard", kinds)
+            self.assertGreaterEqual(self.query_value("SELECT COUNT(*) FROM mail_queue"), 1)
+        finally:
+            if previous_whitelist is None:
+                os.environ.pop("MAIL_WHITELIST", None)
+            else:
+                os.environ["MAIL_WHITELIST"] = previous_whitelist
+
+    def test_world_after_uses_event_cursor_and_agent_detail_exposes_memory(self):
+        self.game.submit_idea({"text": "给猫做相亲App"})
+        self.game.tick(now=100)
+        first = self.game.world(after=0)
+        latest_event_id = first["events"][-1]["id"]
+        incremental = self.game.world(after=latest_event_id)
+        agent_id = first["agents"][0]["id"]
+        agent = self.game.agent(agent_id)
+
+        self.assertEqual(incremental["events"], [])
+        self.assertEqual(set(first), {"edition", "agents", "conversations", "projects", "events"})
+        self.assertIn("card", agent)
+        self.assertIn("intent", agent)
+        self.assertTrue(agent["memories"])
 
     def test_print_proxy_pending_and_ack_do_not_require_token(self):
-        game = GameService(self.db_path, llm=self.llm)
-        game.join({"templateId": game.template()["templateId"]})
+        self.game.submit_idea({"text": "给猫做相亲App"})
 
-        pending = game.print_pending(limit=5)
-        self.assertEqual(pending[0]["kind"], "charcard")
-        acked = game.print_ack({"ticketIds": [pending[0]["ticketId"]]})
+        pending = self.game.print_pending(limit=5)
+        self.assertEqual(pending[0]["kind"], "receipt")
+        acked = self.game.print_ack({"ticketIds": [pending[0]["ticketId"]]})
         self.assertEqual(acked, {"acked": 1})
-        self.assertEqual(game.print_pending(), [])
+        self.assertEqual(self.game.print_pending(), [])
 
-    def test_trigger_finale_creates_finale_story_and_ticket(self):
-        self.game.trigger_finale()
+    def test_process_next_print_and_mail_retry_failures(self):
+        printer = FakePrinterDriver()
+        printer.fail_next = True
+        game = GameService(self.db_path, printer_driver=printer)
+        game.submit_idea({"text": "给猫做相亲App"})
 
-        story = self.game.story(after=0)
-        self.assertEqual(story["world"]["phase"], "finale")
-        self.assertEqual(story["stories"][0]["kind"], "finale")
-        self.assertEqual(self.query_value("SELECT kind FROM print_queue WHERE kind = 'finale'"), "finale")
+        first = game.process_next_print_job()
+        second = game.process_next_print_job()
 
-    def test_admin_reset_requires_confirmation_and_preserves_settings(self):
-        self.game.join({"templateId": self.game.template()["templateId"]})
-        self.game.update_admin({"storyBackground": "维修区背景", "generationPaused": True})
+        self.assertEqual(first["status"], "pending")
+        self.assertEqual(second["status"], "printed")
+
+    def test_reset_requires_confirmation_and_starts_fresh_edition(self):
+        self.game.submit_idea({"text": "给猫做相亲App"})
 
         with self.assertRaises(ApiError):
             self.game.reset_story({"confirm": "WRONG"})
@@ -291,26 +330,9 @@ class GameServiceTest(unittest.TestCase):
         reset = self.game.reset_story({"confirm": "RESET"})
 
         self.assertEqual(reset["reset"], True)
-        self.assertEqual(self.query_value("SELECT COUNT(*) FROM characters"), 0)
-        self.assertEqual(self.query_value("SELECT COUNT(*) FROM stories"), 0)
-        self.assertEqual(self.query_value("SELECT COUNT(*) FROM rules"), 0)
-        self.assertEqual(self.query_value("SELECT COUNT(*) FROM print_queue"), 0)
-        self.assertEqual(self.game.admin()["storyBackground"], "维修区背景")
-
-    def test_leave_card_mail_and_print_contracts_remain_available(self):
-        joined = self.game.join({
-            "templateId": self.game.template()["templateId"],
-            "email": "hero@example.com",
-        })
-
-        left = self.game.leave({"charId": joined["charId"]})
-        me = self.game.me(joined["charId"])
-        card = self.game.card(joined["charId"])
-
-        self.assertEqual(left, {"cardUrl": f"/card/{joined['charId']}"})
-        self.assertEqual(me["status"], "ended")
-        self.assertEqual(card["name"], joined["name"])
-        self.assertEqual(self.query_value("SELECT kind FROM print_queue WHERE kind = 'ending'"), "ending")
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM ideas"), 0)
+        self.assertEqual(self.query_value("SELECT no FROM editions WHERE id = 1"), 1)
+        self.assertGreaterEqual(self.game.ensure_world()["agents"], 11)
 
 
 class HttpContractTest(unittest.TestCase):
@@ -343,41 +365,44 @@ class HttpContractTest(unittest.TestCase):
         parsed = json.loads(data.decode("utf-8")) if data else None
         return response.status, parsed
 
-    def test_http_join_batch_story_print_and_finale_contract(self):
-        status, template = self.request("GET", "/api/template")
+    def test_http_idea_world_agent_host_and_print_contract(self):
+        status, idea = self.request("POST", "/api/idea", {"text": "给猫做相亲App", "investorName": "七色"})
         self.assertEqual(status, 200)
+        self.assertIn("receiptNo", idea)
 
-        status, joined = self.request("POST", "/api/join", {"templateId": template["templateId"]})
+        status, tracked = self.request("GET", f"/api/idea/{idea['ideaId']}")
         self.assertEqual(status, 200)
-        self.assertIn("batchId", joined)
+        self.assertEqual(tracked["status"], "pooled")
 
-        status, batch = self.request("GET", f"/api/batch/{joined['batchId']}")
+        self.game.tick(now=100)
+        status, world = self.request("GET", "/api/world?after=0")
         self.assertEqual(status, 200)
-        self.assertEqual(batch["status"], "gathering")
+        self.assertEqual(set(world), {"edition", "agents", "conversations", "projects", "events"})
 
-        status, pending = self.request("GET", "/api/print/pending?limit=5")
+        status, agent = self.request("GET", f"/api/agent/{world['agents'][0]['id']}")
         self.assertEqual(status, 200)
-        self.assertEqual(pending[0]["kind"], "charcard")
+        self.assertIn("memories", agent)
+
+        status, host = self.request("POST", "/api/host", {"action": "skip_phase", "phase": "pitch"})
+        self.assertEqual(status, 200)
+        self.assertEqual(host["edition"]["phase"], "pitch")
+
+        status, pending = self.request("GET", "/api/print/pending", headers={"X-Print-Token": "ignored"})
+        self.assertEqual(status, 200)
+        self.assertEqual(pending[0]["kind"], "receipt")
 
         status, acked = self.request("POST", "/api/print/ack", {"ticketIds": [pending[0]["ticketId"]]})
         self.assertEqual(status, 200)
         self.assertEqual(acked["acked"], 1)
 
-        status, finale = self.request("POST", "/api/finale", {})
-        self.assertEqual(status, 200)
-        self.assertEqual(finale["world"]["phase"], "finale")
+    def test_removed_v3_routes_return_not_found(self):
+        status, rejected = self.request("GET", "/api/template")
+        self.assertEqual(status, 404)
+        self.assertEqual(rejected["error"]["code"], "NOT_FOUND")
 
-        status, story = self.request("GET", "/api/story?after=0")
-        self.assertEqual(status, 200)
-        self.assertEqual(set(story.keys()), {"world", "rules", "stories"})
-
-    def test_print_proxy_ignores_bad_token(self):
-        self.game.join({"templateId": self.game.template()["templateId"]})
-
-        status, pending = self.request("GET", "/api/print/pending", headers={"X-Print-Token": "bad"})
-
-        self.assertEqual(status, 200)
-        self.assertEqual(pending[0]["kind"], "charcard")
+        status, rejected = self.request("POST", "/api/join", {"templateId": "t_001"})
+        self.assertEqual(status, 404)
+        self.assertEqual(rejected["error"]["code"], "NOT_FOUND")
 
 
 class StaticFileTest(unittest.TestCase):
@@ -408,15 +433,16 @@ class StaticFileTest(unittest.TestCase):
 
 
 class AsyncGameServiceTest(unittest.TestCase):
-    def test_async_wrapper_delegates_v3_methods(self):
+    def test_async_wrapper_delegates_v4_methods(self):
         with tempfile.TemporaryDirectory() as tmp:
             game = GameService(str(Path(tmp) / "game.sqlite"))
             service = AsyncGameService(game, None)
 
-            joined = service.join({"templateId": service.template()["templateId"]})
+            idea = service.submit_idea({"text": "给猫做相亲App"})
+            service.tick(now=100)
 
-            self.assertEqual(service.batch(joined["batchId"])["status"], "gathering")
-            self.assertIn("world", service.story())
+            self.assertEqual(service.idea(idea["ideaId"])["status"], "developing")
+            self.assertIn("edition", service.world())
             game.close()
 
 

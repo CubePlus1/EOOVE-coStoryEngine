@@ -3,7 +3,6 @@ import re
 import threading
 import time
 import uuid
-from pathlib import Path
 
 from .config import get_env
 from .db import connect, initialize
@@ -12,10 +11,17 @@ from .mail import SmtpMailTransport
 from .printer import CommandPrinterDriver
 
 
-BATCH_TARGET_SIZE = 3
-BATCH_MAX_SIZE = 4
-BATCH_WINDOW_SECONDS = 45
-JOIN_REJECTION_MESSAGE = "这个名字被世界吞掉了,换一个吧"
+PHASES = ["opening", "early_dev", "mid_crisis", "deadline", "pitch", "awards"]
+PHASE_DURATIONS = {
+    "opening": 5 * 60,
+    "early_dev": 15 * 60,
+    "mid_crisis": 8 * 60,
+    "deadline": 5 * 60,
+    "pitch": 8 * 60,
+    "awards": 4 * 60,
+}
+LOCATIONS = ["工位区A", "工位区B", "工位区C", "泡面咖啡角", "天台", "路演台", "评委席"]
+IDEA_REJECTION_MESSAGE = "组委会认为这个点子过于超前,换一个吧"
 SENSITIVE_WORDS = ("毁灭", "杀", "血腥", "色情", "政治", "广告", "全世界")
 
 
@@ -37,34 +43,215 @@ class GameService:
         llm=None,
         mail_transport=None,
         printer_driver=None,
-        legends_path=None,
-        incidents_path=None,
-        print_token=None,
+        economy_mode=True,
     ):
         self.db_path = db_path
-        self.incidents = self._load_incidents(incidents_path or legends_path)
         self.conn = connect(db_path)
         initialize(self.conn)
         self.llm = llm if llm is not None else HttpJsonLlmGateway()
         self.mail_transport = mail_transport if mail_transport is not None else SmtpMailTransport()
         self.printer_driver = printer_driver if printer_driver is not None else CommandPrinterDriver()
+        self.economy_mode = economy_mode
         self.lock = threading.RLock()
         with self.lock:
-            self._seed_templates_if_needed()
+            self.ensure_world()
 
     def close(self):
         self.conn.close()
+
+    def ensure_world(self, now=None):
+        if now is None:
+            now = int(time.time())
+        edition = self.conn.execute("SELECT * FROM editions ORDER BY id DESC LIMIT 1").fetchone()
+        if edition is None:
+            self.conn.execute(
+                """
+                INSERT INTO editions (id, no, phase, phase_ends_at, started_at)
+                VALUES (1, 1, 'opening', ?, ?)
+                """,
+                (now + PHASE_DURATIONS["opening"], now),
+            )
+            self._seed_agents()
+            self._form_teams(edition_id=1)
+            self._event(1, "edition_started", {"no": 1, "phase": "opening"}, now)
+            self.conn.commit()
+        return {
+            "edition": self._edition_public(self._edition()),
+            "agents": self.conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0],
+        }
+
+    def submit_idea(self, payload):
+        self._require_mapping(payload)
+        text = self._validate_idea_text(payload.get("text"))
+        investor_name = self._optional_text(payload.get("investorName"), 24)
+        email = self._optional_text(payload.get("email"), 120)
+        now = int(time.time())
+        with self.lock:
+            edition = self._edition()
+            receipt_no = self._new_receipt_no(edition["no"])
+            self.conn.execute(
+                """
+                INSERT INTO ideas
+                (text, investor_name, email, receipt_no, status, current_form,
+                 progress, current_bug, created_at)
+                VALUES (?, ?, ?, ?, 'pooled', ?, 0, NULL, ?)
+                """,
+                (text, investor_name, email, receipt_no, text, now),
+            )
+            idea_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            self._enqueue_print("receipt", {
+                "ideaId": idea_id,
+                "receiptNo": receipt_no,
+                "idea": text,
+                "investorName": investor_name,
+                "editionNo": edition["no"],
+            })
+            self._event(edition["id"], "idea_received", {
+                "ideaId": idea_id,
+                "receiptNo": receipt_no,
+                "idea": text,
+                "investorName": investor_name,
+            }, now)
+            self._log_input("idea", payload, "accepted")
+            self.conn.commit()
+            return {"ideaId": idea_id, "receiptNo": receipt_no}
+
+    def idea(self, idea_id):
+        with self.lock:
+            row = self._idea_row(idea_id)
+            team = self._team_row(row["team_id"]) if row["team_id"] else None
+            gossip = [
+                json.loads(event["payload_json"]).get("text")
+                for event in self.conn.execute(
+                    """
+                    SELECT payload_json FROM events
+                    WHERE type IN ('gossip', 'conversation') AND payload_json LIKE ?
+                    ORDER BY id DESC LIMIT 5
+                    """,
+                    (f"%{row['text']}%",),
+                ).fetchall()
+            ]
+            return {
+                "status": row["status"],
+                "teamName": None if team is None else team["name"],
+                "currentForm": row["current_form"],
+                "progress": row["progress"],
+                "currentBug": row["current_bug"],
+                "gossip": [item for item in gossip if item],
+                "review": row["review"],
+                "rank": row["rank"],
+            }
+
+    def tick(self, now=None):
+        if now is None:
+            now = int(time.time())
+        with self.lock:
+            self.ensure_world(now=now)
+            edition = self._edition()
+            if now >= edition["phase_ends_at"]:
+                edition = self._advance_phase(edition, now)
+            if edition["phase"] == "awards":
+                self._award_ideas(edition, now)
+            elif edition["phase"] == "pitch":
+                self._pitch_ideas(edition, now)
+            else:
+                self._claim_waiting_ideas(edition, now)
+                self._advance_projects(edition, now)
+                self._conversation_tick(edition, now)
+            self.conn.commit()
+            return {"advanced": True, "edition": self._edition_public(self._edition())}
+
+    def world(self, after=0):
+        after = self._coerce_non_negative_int(after)
+        with self.lock:
+            edition = self._edition()
+            agents = [self._agent_public(row) for row in self.conn.execute("SELECT * FROM agents ORDER BY id").fetchall()]
+            conversations = [
+                self._conversation_public(row)
+                for row in self.conn.execute(
+                    "SELECT * FROM conversations WHERE edition_id = ? ORDER BY id DESC LIMIT 12",
+                    (edition["id"],),
+                ).fetchall()
+            ]
+            projects = [self._project_public(row) for row in self.conn.execute(
+                "SELECT * FROM ideas WHERE team_id IS NOT NULL ORDER BY id"
+            ).fetchall()]
+            events = [
+                self._event_public(row)
+                for row in self.conn.execute(
+                    "SELECT * FROM events WHERE id > ? ORDER BY id LIMIT 100",
+                    (after,),
+                ).fetchall()
+            ]
+            return {
+                "edition": self._edition_public(edition),
+                "agents": agents,
+                "conversations": list(reversed(conversations)),
+                "projects": projects,
+                "events": events,
+            }
+
+    def agent(self, agent_id):
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            if row is None:
+                raise ApiError("NOT_FOUND", "找不到这位参赛者。", status=404)
+            memories = [
+                {"id": item["id"], "text": item["text"], "importance": item["importance"]}
+                for item in self.conn.execute(
+                    "SELECT * FROM memories WHERE agent_id = ? ORDER BY id DESC LIMIT 10",
+                    (agent_id,),
+                ).fetchall()
+            ]
+            return {
+                "card": {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "persona": row["persona"],
+                    "stack": row["stack"],
+                    "catchphrase": row["catchphrase"],
+                    "role": row["role"],
+                },
+                "intent": row["intent"],
+                "memories": memories,
+            }
+
+    def host(self, payload):
+        self._require_mapping(payload)
+        action = payload.get("action")
+        now = int(time.time())
+        with self.lock:
+            edition = self._edition()
+            if action == "start":
+                self.reset_story({"confirm": "RESET"})
+            elif action == "skip_phase":
+                phase = payload.get("phase")
+                if phase not in PHASES:
+                    phase = self._next_phase(edition["phase"])
+                self.conn.execute(
+                    "UPDATE editions SET phase = ?, phase_ends_at = ? WHERE id = ?",
+                    (phase, now + PHASE_DURATIONS[phase], edition["id"]),
+                )
+                self._event(edition["id"], "phase_changed", {"phase": phase}, now)
+            elif action == "finale":
+                self.conn.execute(
+                    "UPDATE editions SET phase = 'awards', phase_ends_at = ? WHERE id = ?",
+                    (now + PHASE_DURATIONS["awards"], edition["id"]),
+                )
+                self._award_ideas(self._edition(), now)
+            else:
+                raise ApiError("REJECTED", "主持人动作无效。")
+            self.conn.commit()
+            return {"edition": self._edition_public(self._edition())}
 
     def admin(self):
         with self.lock:
             settings = self._admin_settings()
             stats = {
-                "characters": self.conn.execute("SELECT COUNT(*) FROM characters").fetchone()[0],
-                "stories": self.conn.execute("SELECT COUNT(*) FROM stories").fetchone()[0],
-                "rules": self.conn.execute("SELECT COUNT(*) FROM rules").fetchone()[0],
-                "pendingPrintJobs": self.conn.execute(
-                    "SELECT COUNT(*) FROM print_queue WHERE status = 'pending'"
-                ).fetchone()[0],
+                "ideas": self.conn.execute("SELECT COUNT(*) FROM ideas").fetchone()[0],
+                "agents": self.conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0],
+                "events": self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+                "pendingPrintJobs": self.conn.execute("SELECT COUNT(*) FROM print_queue WHERE status = 'pending'").fetchone()[0],
             }
             result = self._admin_public(settings)
             result["stats"] = stats
@@ -77,16 +264,14 @@ class GameService:
             story_background = current["story_background"]
             beat_interval = current["beat_interval_seconds"]
             generation_paused = bool(current["generation_paused"])
-
             if "storyBackground" in payload:
-                story_background = self._bounded_optional_text(payload["storyBackground"], 1200)
+                story_background = self._optional_text(payload["storyBackground"], 1200)
             if "beatIntervalSeconds" in payload:
                 beat_interval = self._coerce_admin_interval(payload["beatIntervalSeconds"])
             if "generationPaused" in payload:
                 if not isinstance(payload["generationPaused"], bool):
                     raise ApiError("REJECTED", "暂停状态必须是真或假。")
                 generation_paused = payload["generationPaused"]
-
             self.conn.execute(
                 """
                 UPDATE admin_settings
@@ -103,208 +288,34 @@ class GameService:
         if payload.get("confirm") != "RESET":
             raise ApiError("REJECTED", "重置故事需要输入 RESET。")
         with self.lock:
-            self.conn.execute(
-                "UPDATE world SET phase = 'running', repair_count = 0, finale_target = 10 WHERE id = 1"
-            )
             for table in [
-                "characters",
-                "batches",
-                "batch_members",
-                "rules",
-                "stories",
+                "editions",
+                "agents",
+                "teams",
+                "ideas",
+                "memories",
+                "conversations",
+                "events",
                 "print_queue",
                 "mail_queue",
                 "inputs_log",
             ]:
                 self.conn.execute(f"DELETE FROM {table}")
-            self.conn.execute("UPDATE templates SET used = 0")
             self.conn.commit()
+            self.ensure_world()
             result = self.admin()
             result["reset"] = True
             return result
-
-    def template(self):
-        with self.lock:
-            self._seed_templates_if_needed()
-            row = self.conn.execute(
-                "SELECT * FROM templates WHERE used = 0 ORDER BY id LIMIT 1"
-            ).fetchone()
-            if row is None:
-                self._seed_templates(force=True)
-                row = self.conn.execute(
-                    "SELECT * FROM templates WHERE used = 0 ORDER BY id LIMIT 1"
-                ).fetchone()
-            return self._template_public(row)
-
-    def join(self, payload):
-        self._require_mapping(payload)
-        template_id = payload.get("templateId")
-        if not isinstance(template_id, str) or not template_id.strip():
-            raise ApiError("REJECTED", "世界没有抽到这张卡。")
-        edits = payload.get("edits") or {}
-        if not isinstance(edits, dict):
-            raise ApiError("REJECTED", JOIN_REJECTION_MESSAGE)
-
-        with self.lock:
-            template = self.conn.execute(
-                "SELECT * FROM templates WHERE id = ? AND used = 0",
-                (template_id,),
-            ).fetchone()
-            if template is None:
-                raise ApiError("NOT_FOUND", "这张卡已经滑进别人的故事。", status=404)
-            tags = json.loads(template["tags_json"])
-            name = self._edited_name(edits.get("name"), template["name"])
-            tags = self._edited_tags(edits.get("tagSwap"), tags)
-            self._validate_join_edits(name, tags)
-            origin = self._bounded_join_field(payload.get("origin"), "宇宙临时维修区", 40)
-            quirk = self._bounded_join_field(payload.get("quirk"), "会把异常拧成蝴蝶结", 60)
-            char_id = self._new_char_id()
-            now = int(time.time())
-            self.conn.execute(
-                """
-                INSERT INTO characters
-                (id, name, profile, tags_json, origin, quirk, type, status, email, ending,
-                 last_seen_story, joined_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'human', 'active', ?, NULL, 0, ?)
-                """,
-                (
-                    char_id,
-                    name,
-                    template["profile"],
-                    json.dumps(tags, ensure_ascii=False),
-                    origin,
-                    quirk,
-                    payload.get("email"),
-                    now,
-                ),
-            )
-            self.conn.execute("UPDATE templates SET used = 1 WHERE id = ?", (template_id,))
-            batch = self._current_or_new_batch(now)
-            self.conn.execute(
-                """
-                INSERT INTO batch_members (batch_id, char_id, type, joined_at)
-                VALUES (?, ?, 'human', ?)
-                """,
-                (batch["id"], char_id, now),
-            )
-            self._enqueue_print("charcard", {
-                "charId": char_id,
-                "name": name,
-                "profile": template["profile"],
-                "tags": tags,
-                "origin": origin,
-                "quirk": quirk,
-            })
-            self._log_input("join", payload, "accepted")
-            self._maybe_complete_batch(batch["id"], now)
-            self.conn.commit()
-            return {
-                "charId": char_id,
-                "batchId": batch["id"],
-                "etaSeconds": max(0, batch["deadline_at"] - now),
-                "name": name,
-                "profile": template["profile"],
-                "origin": origin,
-                "quirk": quirk,
-            }
-
-    def batch(self, batch_id, now=None):
-        if now is None:
-            now = int(time.time())
-        with self.lock:
-            batch = self._batch_row(batch_id)
-            if batch["status"] == "gathering" and now >= batch["deadline_at"]:
-                self._complete_batch(batch["id"], now, allow_ai=True)
-                self.conn.commit()
-                batch = self._batch_row(batch_id)
-            return self._batch_public(batch, now)
-
-    def story(self, after=0):
-        after = self._coerce_non_negative_int(after)
-        with self.lock:
-            stories = [
-                self._story_public(row)
-                for row in self.conn.execute(
-                    "SELECT * FROM stories WHERE id > ? ORDER BY id LIMIT 80",
-                    (after,),
-                ).fetchall()
-            ]
-            rules = [
-                {"id": row["id"], "text": row["text"]}
-                for row in self.conn.execute("SELECT id, text FROM rules ORDER BY id").fetchall()
-            ]
-            return {
-                "world": self._world_public(self._world()),
-                "rules": rules,
-                "stories": stories,
-            }
-
-    def me(self, char_id):
-        with self.lock:
-            char = self._character(char_id, active_only=False)
-            timeline = []
-            for row in self.conn.execute(
-                "SELECT id, personal_json FROM stories ORDER BY id"
-            ).fetchall():
-                personal = json.loads(row["personal_json"] or "{}")
-                if char_id in personal:
-                    timeline.append({"storyId": row["id"], "text": personal[char_id]})
-            return {
-                "profile": char["profile"],
-                "tags": json.loads(char["tags_json"]),
-                "origin": char["origin"],
-                "quirk": char["quirk"],
-                "status": char["status"],
-                "timeline": timeline,
-                "ending": char["ending"],
-            }
-
-    def card(self, char_id):
-        with self.lock:
-            char = self._character(char_id, active_only=False)
-            return {
-                "name": char["name"],
-                "profile": char["profile"],
-                "tags": json.loads(char["tags_json"]),
-                "origin": char["origin"],
-                "quirk": char["quirk"],
-                "ending": char["ending"],
-                "qrUrl": "/",
-            }
-
-    def leave(self, payload):
-        self._require_mapping(payload)
-        with self.lock:
-            char = self._character(payload.get("charId"), active_only=False)
-            if char["status"] == "ended":
-                return {"cardUrl": f"/card/{char['id']}"}
-            ending = self._make_ending(char, self._world())
-            self.conn.execute(
-                "UPDATE characters SET status = 'ended', ending = ? WHERE id = ?",
-                (ending, char["id"]),
-            )
-            self._enqueue_print("ending", {"charId": char["id"], "ending": ending})
-            self._log_input("leave", payload, "accepted")
-            self.conn.commit()
-            return {"cardUrl": f"/card/{char['id']}"}
 
     def print_pending(self, token=None, limit=5):
         limit = max(1, min(self._coerce_non_negative_int(limit) or 5, 20))
         with self.lock:
             rows = self.conn.execute(
-                """
-                SELECT * FROM print_queue
-                WHERE status = 'pending'
-                ORDER BY id LIMIT ?
-                """,
+                "SELECT * FROM print_queue WHERE status = 'pending' ORDER BY id LIMIT ?",
                 (limit,),
             ).fetchall()
             return [
-                {
-                    "ticketId": row["id"],
-                    "kind": row["kind"],
-                    "payload": json.loads(row["payload_json"]),
-                }
+                {"ticketId": row["id"], "kind": row["kind"], "payload": json.loads(row["payload_json"])}
                 for row in rows
             ]
 
@@ -328,24 +339,10 @@ class GameService:
             self.conn.commit()
             return {"acked": acked}
 
-    def trigger_finale(self, token=None):
-        with self.lock:
-            world = self._world()
-            if world["phase"] != "finale":
-                story_id = self._insert_finale_story()
-                self.conn.execute("UPDATE world SET phase = 'finale' WHERE id = 1")
-                self._enqueue_print("finale", {"storyId": story_id, "participants": self._human_participant_names()})
-                self.conn.commit()
-            return self.story(after=0)
-
     def process_next_print_job(self):
         with self.lock:
             row = self.conn.execute(
-                """
-                SELECT * FROM print_queue
-                WHERE status = 'pending'
-                ORDER BY id LIMIT 1
-                """
+                "SELECT * FROM print_queue WHERE status = 'pending' ORDER BY id LIMIT 1"
             ).fetchone()
             if row is None:
                 return None
@@ -360,23 +357,6 @@ class GameService:
             self.conn.commit()
             return {"id": row["id"], "kind": row["kind"], "payload": payload, "status": "printed"}
 
-    def record_ending_mail(self, char_id, now=None):
-        if now is None:
-            now = int(time.time())
-        with self.lock:
-            char = self._character(char_id, active_only=False)
-            if not char["email"]:
-                return None
-            mail = self._insert_mail(
-                char_id=char["id"],
-                email=char["email"],
-                kind="ending",
-                reason=char["ending"] or "你的结局正在维修区边缘显影。",
-                now=now,
-            )
-            self.conn.commit()
-            return mail
-
     def process_next_mail_job(self):
         with self.lock:
             row = self.conn.execute(
@@ -386,10 +366,10 @@ class GameService:
                 return None
             message = {
                 "to": row["email"],
-                "subject": "宇宙维修区仍在呼唤你",
+                "subject": "你的 AI 黑客松项目有新进展",
                 "body": row["in_world_reason"],
                 "kind": row["kind"],
-                "charId": row["char_id"],
+                "ideaId": row["idea_id"],
             }
             try:
                 self.mail_transport.send(message)
@@ -403,9 +383,6 @@ class GameService:
             return self._mail_public(sent)
 
     def ingest_mail_reply(self, email, text):
-        if not isinstance(email, str) or not email.strip():
-            raise ApiError("NOT_FOUND", "世界找不到这封回信的主人。", status=404)
-        self._validate_text(text, "回信")
         return {"accepted": True}
 
     def enqueue_beat(self, now=None):
@@ -415,305 +392,399 @@ class GameService:
         return None
 
     def maybe_beat(self, now=None, idle_seconds=25):
-        return None
-
-    def record_mail_for_act(self, involved, importance, in_world_reason, now=None):
-        return []
-
-    def _maybe_complete_batch(self, batch_id, now):
-        members = self._batch_members(batch_id)
-        if len(members) >= BATCH_TARGET_SIZE:
-            self._complete_batch(batch_id, now, allow_ai=False)
-
-    def _complete_batch(self, batch_id, now, allow_ai):
-        batch = self._batch_row(batch_id)
-        if batch["status"] != "gathering":
-            return batch["story_id"]
-        members = self._batch_members(batch_id)
-        if allow_ai:
-            while len(members) < BATCH_TARGET_SIZE:
-                ai_id = self._insert_ai_resident(now)
-                self.conn.execute(
-                    """
-                    INSERT INTO batch_members (batch_id, char_id, type, joined_at)
-                    VALUES (?, ?, 'ai', ?)
-                    """,
-                    (batch_id, ai_id, now),
-                )
-                members = self._batch_members(batch_id)
-        if len(members) < BATCH_TARGET_SIZE:
+        if self._admin_settings()["generation_paused"]:
             return None
-        story_id = self._weave_batch_story(batch_id, members, now)
-        self.conn.execute(
-            "UPDATE batches SET status = 'done', story_id = ? WHERE id = ?",
-            (story_id, batch_id),
-        )
-        return story_id
+        return self.tick(now=now)
 
-    def _weave_batch_story(self, batch_id, members, now):
-        incident = self._incident_for_next_story()
-        rules = [
-            {"id": row["id"], "text": row["text"]}
-            for row in self.conn.execute("SELECT id, text FROM rules ORDER BY id").fetchall()
-        ]
-        context = {
-            "world": self._world_public(self._world()),
-            "storyBackground": self._admin_settings()["story_background"],
-            "incident": incident["incident"],
-            "endingTemplate": incident["ending"],
-            "rules": rules,
-            "members": [self._member_context(row) for row in members],
-            "tone": "宇宙临时维修区,荒诞、轻快、每个 quirk 至少发挥一次作用。",
-        }
-        result = self._coerce_story_result(self._weave_with_llm(context), context)
-        story_id = self._insert_story(
-            kind="repair",
-            incident=incident["incident"],
-            segments=result["segments"],
-            members=[self._member_public(row) for row in members],
-            personal=result["personal"],
-            created_at=now,
-        )
-        rule_text = result["rule"]
-        rule_id = self._insert_rule(story_id, rule_text, now)
-        self.conn.execute("UPDATE stories SET rule_id = ? WHERE id = ?", (rule_id, story_id))
-        self.conn.execute("UPDATE world SET repair_count = repair_count + 1 WHERE id = 1")
-        self.conn.execute(
-            "UPDATE characters SET last_seen_story = ? WHERE id IN (%s)" % ",".join("?" for _ in members),
-            (story_id, *[row["id"] for row in members]),
-        )
-        self._enqueue_print("report", {
-            "storyId": story_id,
-            "incident": incident["incident"],
-            "rule": rule_text,
-            "members": [row["name"] for row in members],
-        })
-        world = self._world()
-        if world["repair_count"] >= world["finale_target"]:
-            self._insert_finale_story()
-            self.conn.execute("UPDATE world SET phase = 'finale' WHERE id = 1")
-        return story_id
-
-    def _weave_with_llm(self, context):
-        for _ in range(2):
-            try:
-                result = self.llm.weave(context)
-            except (TypeError, KeyError, ValueError, RuntimeError):
-                result = None
-            if result is None:
-                continue
-            try:
-                return self._validate_story_result(result)
-            except (TypeError, KeyError, ValueError):
-                continue
-        return None
-
-    def _validate_story_result(self, result):
-        if not isinstance(result, dict):
-            raise TypeError("story result must be object")
-        segments = result["segments"]
-        if not isinstance(segments, list) or not segments:
-            raise ValueError("segments must be non-empty")
-        cleaned_segments = []
-        for segment in segments:
-            if not isinstance(segment, dict):
-                raise TypeError("segment must be object")
-            focus = segment.get("focusCharIds") or []
-            if not isinstance(focus, list):
-                raise TypeError("focusCharIds must be list")
-            cleaned_segments.append({
-                "text": self._bounded_text(segment["text"], 260),
-                "focusCharIds": [str(item) for item in focus],
-            })
-        personal = result.get("personal") or {}
-        if not isinstance(personal, dict):
-            raise TypeError("personal must be object")
-        return {
-            "segments": cleaned_segments,
-            "rule": self._bounded_text(result["rule"], 30),
-            "personal": {str(key): self._limit(str(value), 160) for key, value in personal.items()},
-        }
-
-    def _coerce_story_result(self, result, context):
-        if result is not None:
-            return result
-        names = "、".join(member["name"] for member in context["members"])
-        segments = []
-        personal = {}
-        for member in context["members"]:
-            text = (
-                f"{member['name']}来自{member['origin']},用“{member['quirk']}”修了"
-                f"{context['incident']}的一角。"
+    def _claim_waiting_ideas(self, edition, now):
+        teams = self.conn.execute(
+            "SELECT * FROM teams WHERE edition_id = ? ORDER BY id",
+            (edition["id"],),
+        ).fetchall()
+        ideas = self.conn.execute(
+            """
+            SELECT * FROM ideas
+            WHERE status IN ('pooled', 'carried_over') AND team_id IS NULL
+            ORDER BY id
+            """
+        ).fetchall()
+        for index, idea in enumerate(ideas):
+            team = teams[index % len(teams)]
+            current_form = self._mutate_form(idea["text"], edition["phase"])
+            self.conn.execute(
+                """
+                UPDATE ideas
+                SET status = 'developing', team_id = ?, current_form = ?, current_bug = ?
+                WHERE id = ?
+                """,
+                (team["id"], current_form, self._bug_for(idea["text"], 0), idea["id"]),
             )
-            segments.append({"text": self._limit(text, 260), "focusCharIds": [member["charId"]]})
-            personal[member["charId"]] = self._limit(f"你在维修区被点名: {member['quirk']}派上了用场。", 160)
-        ending = context["endingTemplate"].format(names=names, rule="临时规则已生效")
-        segments.append({"text": self._limit(ending, 260), "focusCharIds": [member["charId"] for member in context["members"]]})
-        return {
-            "segments": segments,
-            "rule": self._limit(f"自本次修复起,{names[:8]}负责给异常贴标签", 30),
-            "personal": personal,
-        }
+            self.conn.execute("UPDATE teams SET idea_id = ? WHERE id = ?", (idea["id"], team["id"]))
+            self._event(edition["id"], "idea_claimed", {
+                "ideaId": idea["id"],
+                "teamName": team["name"],
+                "idea": idea["text"],
+                "currentForm": current_form,
+            }, now)
+            self._insert_mail(idea, "claimed", f"你的点子被 {team['name']} 认领了: {current_form}", now)
 
-    def _insert_story(self, kind, incident, segments, members, personal, created_at):
+    def _advance_projects(self, edition, now):
+        ideas = self.conn.execute(
+            "SELECT * FROM ideas WHERE status IN ('developing', 'pivoted') ORDER BY id"
+        ).fetchall()
+        for idea in ideas:
+            increment = 18 if edition["phase"] == "deadline" else 9
+            progress = min(100, idea["progress"] + increment)
+            bug = self._bug_for(idea["text"], progress)
+            status = "presented" if edition["phase"] == "pitch" else idea["status"]
+            self.conn.execute(
+                "UPDATE ideas SET progress = ?, current_bug = ?, status = ? WHERE id = ?",
+                (progress, bug, status, idea["id"]),
+            )
+            self._event(edition["id"], "project_update", {
+                "ideaId": idea["id"],
+                "progress": progress,
+                "currentBug": bug,
+            }, now)
+
+    def _conversation_tick(self, edition, now):
+        agents = self.conn.execute(
+            """
+            SELECT * FROM agents
+            WHERE role = 'hacker'
+            ORDER BY id LIMIT 2
+            """
+        ).fetchall()
+        if len(agents) < 2:
+            return
+        idea = self.conn.execute("SELECT * FROM ideas ORDER BY id DESC LIMIT 1").fetchone()
+        idea_text = "空白项目"
+        if idea is not None:
+            idea_text = idea["text"]
+        memories = {agent["id"]: self._top_memories(agent["id"]) for agent in agents}
+        context = {
+            "task": "conversation",
+            "mode": "economy",
+            "edition": self._edition_public(edition),
+            "idea": idea_text,
+            "agents": [
+                {
+                    "id": agent["id"],
+                    "name": agent["name"],
+                    "persona": agent["persona"],
+                    "stack": agent["stack"],
+                    "catchphrase": agent["catchphrase"],
+                    "intent": agent["intent"],
+                    "memories": memories[agent["id"]],
+                }
+                for agent in agents
+            ],
+        }
+        result = self._coerce_conversation_result(self._weave_with_llm(context), context)
         self.conn.execute(
             """
-            INSERT INTO stories (kind, incident, segments_json, members_json, personal_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO conversations (edition_id, location, agent_ids_json, lines_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
-                kind,
-                incident,
-                json.dumps(segments, ensure_ascii=False),
-                json.dumps(members, ensure_ascii=False),
-                json.dumps(personal, ensure_ascii=False),
-                created_at,
+                edition["id"],
+                "泡面咖啡角",
+                json.dumps([agent["id"] for agent in agents], ensure_ascii=False),
+                json.dumps(result["lines"], ensure_ascii=False),
+                now,
             ),
         )
-        return self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conversation_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for agent in agents:
+            memory_text = result["memories"].get(agent["id"]) or f"听说有人想做{idea_text}"
+            self._insert_memory(agent["id"], memory_text, 3, now)
+            self.conn.execute(
+                "UPDATE agents SET intent = ?, location = ?, talking = 0 WHERE id = ?",
+                (result["intents"].get(agent["id"]) or "想继续打探别队进度", "泡面咖啡角", agent["id"]),
+            )
+        gossip_text = f"泡面角有人提到了你的idea: {idea_text}"
+        self._event(edition["id"], "conversation", {
+            "conversationId": conversation_id,
+            "location": "泡面咖啡角",
+            "text": gossip_text,
+            "lines": result["lines"],
+        }, now)
+        self._event(edition["id"], "gossip", {"text": gossip_text, "idea": idea_text}, now)
 
-    def _insert_rule(self, story_id, text, created_at):
+    def _pitch_ideas(self, edition, now):
+        ideas = self.conn.execute(
+            "SELECT * FROM ideas WHERE team_id IS NOT NULL AND status IN ('developing', 'pivoted', 'presented') ORDER BY id"
+        ).fetchall()
+        for idea in ideas:
+            review = idea["review"] or f"AI评委: {idea['current_form']} 很有黑客松精神,但 demo 像临时长出来的。"
+            self.conn.execute(
+                "UPDATE ideas SET status = 'presented', review = ?, progress = 100 WHERE id = ?",
+                (review, idea["id"]),
+            )
+            self._event(edition["id"], "pitch", {"ideaId": idea["id"], "review": review}, now)
+
+    def _award_ideas(self, edition, now):
+        ideas = self.conn.execute(
+            "SELECT * FROM ideas WHERE team_id IS NOT NULL AND status IN ('presented', 'developing', 'pivoted') ORDER BY progress DESC, id"
+        ).fetchall()
+        if not ideas:
+            return
+        leaderboard = []
+        for rank, idea in enumerate(ideas, start=1):
+            review = idea["review"] or f"AI评委: {idea['current_form']} 让人想投资一包泡面。"
+            self.conn.execute(
+                "UPDATE ideas SET status = 'awarded', rank = ?, review = ? WHERE id = ?",
+                (rank, review, idea["id"]),
+            )
+            payload = {
+                "ideaId": idea["id"],
+                "receiptNo": idea["receipt_no"],
+                "idea": idea["text"],
+                "investorName": idea["investor_name"],
+                "teamName": self._team_row(idea["team_id"])["name"],
+                "currentForm": idea["current_form"],
+                "review": review,
+                "rank": rank,
+            }
+            leaderboard.append(payload)
+            self._enqueue_print("certificate", payload)
+            self._insert_mail(idea, "award", f"你的点子获得第 {rank} 名: {review}", now)
+        self._enqueue_print("leaderboard", {"editionNo": edition["no"], "awards": leaderboard})
+        self._event(edition["id"], "awards", {"awards": leaderboard}, now)
+
+    def _advance_phase(self, edition, now):
+        next_phase = self._next_phase(edition["phase"])
+        if next_phase == "opening" and edition["phase"] == "awards":
+            no = edition["no"] + 1
+            self.conn.execute(
+                "INSERT INTO editions (no, phase, phase_ends_at, started_at) VALUES (?, 'opening', ?, ?)",
+                (no, now + PHASE_DURATIONS["opening"], now),
+            )
+            new_edition = self._edition()
+            self._form_teams(new_edition["id"])
+            self.conn.execute(
+                "UPDATE ideas SET status = 'carried_over' WHERE status = 'pooled'"
+            )
+            self._event(new_edition["id"], "edition_started", {"no": no, "phase": "opening"}, now)
+            return new_edition
         self.conn.execute(
-            "INSERT INTO rules (story_id, text, created_at) VALUES (?, ?, ?)",
-            (story_id, text, created_at),
+            "UPDATE editions SET phase = ?, phase_ends_at = ? WHERE id = ?",
+            (next_phase, now + PHASE_DURATIONS[next_phase], edition["id"]),
         )
-        return self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        self._event(edition["id"], "phase_changed", {"phase": next_phase}, now)
+        return self._edition()
 
-    def _insert_finale_story(self):
-        existing = self.conn.execute("SELECT id FROM stories WHERE kind = 'finale' ORDER BY id LIMIT 1").fetchone()
-        if existing is not None:
-            return existing["id"]
-        rules = [row["text"] for row in self.conn.execute("SELECT text FROM rules ORDER BY id").fetchall()]
-        participants = self._human_participant_names()
-        text = (
-            "终幕维修报告: 所有到场者共同造成了宇宙故障,也用共同创作完成了修复。"
-            f"参与者: {'、'.join(participants) or '临时居民'}。规则账本: {';'.join(rules[:5]) or '暂无'}。"
-        )
-        story_id = self._insert_story(
-            kind="finale",
-            incident="终幕元叙事维修",
-            segments=[{"text": self._limit(text, 260), "focusCharIds": []}],
-            members=[],
-            personal={},
-            created_at=int(time.time()),
-        )
-        return story_id
+    def _next_phase(self, phase):
+        index = PHASES.index(phase)
+        return PHASES[(index + 1) % len(PHASES)]
 
-    def _story_public(self, row):
-        rule = None
-        if row["rule_id"]:
-            rule_row = self.conn.execute("SELECT text FROM rules WHERE id = ?", (row["rule_id"],)).fetchone()
-            rule = None if rule_row is None else rule_row["text"]
+    def _weave_with_llm(self, context):
+        try:
+            result = self.llm.weave(context)
+        except (TypeError, KeyError, ValueError, RuntimeError):
+            result = None
+        if isinstance(result, dict):
+            return result
+        return None
+
+    def _coerce_conversation_result(self, result, context):
+        agent_a, agent_b = context["agents"]
+        if result:
+            lines = result.get("lines")
+            memories = result.get("memories") or {}
+            intents = result.get("intents") or {}
+            if isinstance(lines, list) and lines:
+                return {"lines": lines, "memories": memories, "intents": intents}
+        idea = context["idea"]
+        lines = [
+            {"speakerId": agent_a["id"], "text": f"听说有人投了“{idea}”,这个用{agent_a['stack']}重写一遍就好了。"},
+            {"speakerId": agent_b["id"], "text": f"先别重写,我觉得可以包装成路演故事。{agent_b['catchphrase']}"},
+            {"speakerId": agent_a["id"], "text": "那我负责把 bug 命名得像功能。"},
+        ]
         return {
-            "id": row["id"],
-            "kind": row["kind"],
-            "incident": row["incident"],
-            "segments": json.loads(row["segments_json"]),
-            "members": json.loads(row["members_json"]),
-            "rule": rule,
-            "personal": json.loads(row["personal_json"] or "{}"),
+            "lines": lines,
+            "memories": {
+                agent_a["id"]: f"听说新点子是{idea},可能适合技术炫技。",
+                agent_b["id"]: f"听说新点子是{idea},也许能包装成好故事。",
+            },
+            "intents": {
+                agent_a["id"]: "想偷看三号桌的进度",
+                agent_b["id"]: "想把 demo 讲成愿景",
+            },
         }
 
-    def _batch_public(self, row, now):
-        result = {
-            "status": row["status"],
-            "countdown": max(0, row["deadline_at"] - now),
-            "members": [self._member_public(member) for member in self._batch_members(row["id"])],
-        }
-        if row["story_id"]:
-            result["storyId"] = row["story_id"]
-        return result
+    def _seed_agents(self):
+        if self.conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0] > 0:
+            return
+        hackers = [
+            ("h_backend", "后端仔·倔", "Rust原教旨", "Rust", "这个用Rust重写一遍就好了"),
+            ("h_ppt", "PPT侠·嘴强", "零代码叙事专家", "Slides", "demo不重要,故事重要"),
+            ("h_css", "像素洁癖", "CSS完美主义", "CSS", "这个间距差了两像素"),
+            ("h_ai", "提示词巫师", "Prompt炼金术", "LLM", "先让模型自己想想"),
+            ("h_ops", "部署消防员", "凌晨上线体质", "Docker", "我本地是好的"),
+            ("h_data", "表格先知", "Excel能解决一切", "SQL", "先建个表"),
+            ("h_mobile", "小程序游侠", "扫码入口执念", "MiniApp", "用户只会给你三秒"),
+            ("h_game", "玩法拆弹员", "把需求做成游戏", "Canvas", "加个进度条就有反馈"),
+            ("h_fullstack", "全栈临时工", "什么都能接", "TypeScript", "我先糊一个能跑的"),
+        ]
+        judges = [
+            ("j_sharp", "毒舌评委", "专治伪需求", "投资", "所以用户是谁"),
+            ("j_design", "体验评委", "看重第一眼", "UX", "我需要被打动"),
+            ("j_tech", "架构评委", "追问可行性", "System", "边界条件呢"),
+        ]
+        for agent_id, name, persona, stack, catchphrase in hackers:
+            self.conn.execute(
+                """
+                INSERT INTO agents
+                (id, name, persona, stack, catchphrase, role, team_id, location, intent)
+                VALUES (?, ?, ?, ?, ?, 'hacker', NULL, '工位区A', '想找队友组队')
+                """,
+                (agent_id, name, persona, stack, catchphrase),
+            )
+            self._insert_memory(agent_id, f"{name}刚到现场,正在观察谁靠谱。", 2, int(time.time()))
+        for agent_id, name, persona, stack, catchphrase in judges:
+            self.conn.execute(
+                """
+                INSERT INTO agents
+                (id, name, persona, stack, catchphrase, role, team_id, location, intent)
+                VALUES (?, ?, ?, ?, ?, 'judge', NULL, '评委席', '想找到真正能跑的demo')
+                """,
+                (agent_id, name, persona, stack, catchphrase),
+            )
+            self._insert_memory(agent_id, f"{name}准备好点评本届项目。", 3, int(time.time()))
 
-    def _current_or_new_batch(self, now):
-        row = self.conn.execute(
-            """
-            SELECT * FROM batches
-            WHERE status = 'gathering'
-            ORDER BY created_at LIMIT 1
-            """
-        ).fetchone()
-        if row is not None and len(self._batch_members(row["id"])) < BATCH_MAX_SIZE:
-            return row
-        batch_id = f"b_{uuid.uuid4().hex[:8]}"
-        self.conn.execute(
-            """
-            INSERT INTO batches (id, status, created_at, deadline_at)
-            VALUES (?, 'gathering', ?, ?)
-            """,
-            (batch_id, now, now + BATCH_WINDOW_SECONDS),
-        )
-        return self._batch_row(batch_id)
+    def _form_teams(self, edition_id):
+        if self.conn.execute("SELECT COUNT(*) FROM teams WHERE edition_id = ?", (edition_id,)).fetchone()[0]:
+            return
+        hackers = [row["id"] for row in self.conn.execute("SELECT id FROM agents WHERE role = 'hacker' ORDER BY id").fetchall()]
+        team_defs = [
+            ("team_1", "泡面独角兽", hackers[0:3], "工位区A"),
+            ("team_2", "Deadline 救援队", hackers[3:6], "工位区B"),
+            ("team_3", "天台重构社", hackers[6:9], "工位区C"),
+        ]
+        for team_id, name, members, location in team_defs:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO teams (id, edition_id, name, member_ids_json, idea_id)
+                VALUES (?, ?, ?, ?, NULL)
+                """,
+                (team_id, edition_id, name, json.dumps(members, ensure_ascii=False)),
+            )
+            for member in members:
+                self.conn.execute(
+                    "UPDATE agents SET team_id = ?, location = ?, intent = '想认领一个离谱但能讲的idea' WHERE id = ?",
+                    (team_id, location, member),
+                )
 
-    def _batch_row(self, batch_id):
-        row = self.conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
+    def _edition(self):
+        row = self.conn.execute("SELECT * FROM editions ORDER BY id DESC LIMIT 1").fetchone()
         if row is None:
-            raise ApiError("NOT_FOUND", "世界找不到这个集结批次。", status=404)
+            self.ensure_world()
+            row = self.conn.execute("SELECT * FROM editions ORDER BY id DESC LIMIT 1").fetchone()
         return row
 
-    def _batch_members(self, batch_id):
-        return self.conn.execute(
-            """
-            SELECT c.*, bm.type AS member_type
-            FROM batch_members bm
-            JOIN characters c ON c.id = bm.char_id
-            WHERE bm.batch_id = ?
-            ORDER BY bm.joined_at, c.id
-            """,
-            (batch_id,),
-        ).fetchall()
+    def _edition_public(self, row):
+        return {"no": row["no"], "phase": row["phase"], "phaseEndsAt": row["phase_ends_at"]}
 
-    def _member_context(self, row):
+    def _agent_public(self, row):
         return {
-            "charId": row["id"],
+            "id": row["id"],
             "name": row["name"],
-            "origin": row["origin"],
-            "quirk": row["quirk"],
-            "type": row["member_type"],
-            "profile": row["profile"],
-            "tags": json.loads(row["tags_json"]),
+            "location": row["location"],
+            "teamId": row["team_id"],
+            "talking": bool(row["talking"]),
         }
 
-    def _member_public(self, row):
+    def _conversation_public(self, row):
         return {
-            "charId": row["id"],
-            "name": row["name"],
-            "origin": row["origin"],
-            "type": row["member_type"],
+            "id": row["id"],
+            "location": row["location"],
+            "lines": json.loads(row["lines_json"]),
         }
 
-    def _insert_ai_resident(self, now):
-        residents = [
-            ("螺丝巡夜人", "来自反向钟表铺", "能听懂松动螺丝的梦话"),
-            ("雾面档案员", "来自云端唐楼", "会把故障折成纸鹤"),
-            ("恐龙票务员", "来自雨天候车厅", "坚持给恐龙优先购票权"),
-        ]
-        name, origin, quirk = residents[self.conn.execute("SELECT COUNT(*) FROM characters WHERE type = 'ai'").fetchone()[0] % len(residents)]
-        char_id = self._new_char_id()
-        profile = f"{name}: 宇宙临时维修区的 AI 居民。"
+    def _event_public(self, row):
+        payload = json.loads(row["payload_json"])
+        payload["id"] = row["id"]
+        payload["type"] = row["type"]
+        return payload
+
+    def _project_public(self, row):
+        team = self._team_row(row["team_id"]) if row["team_id"] else None
+        return {
+            "teamName": None if team is None else team["name"],
+            "ideaText": row["text"],
+            "currentForm": row["current_form"],
+            "progress": row["progress"],
+            "currentBug": row["current_bug"],
+        }
+
+    def _idea_row(self, idea_id):
+        row = self.conn.execute("SELECT * FROM ideas WHERE id = ?", (idea_id,)).fetchone()
+        if row is None:
+            raise ApiError("NOT_FOUND", "找不到这个点子。", status=404)
+        return row
+
+    def _team_row(self, team_id):
+        row = self.conn.execute("SELECT * FROM teams WHERE id = ?", (team_id,)).fetchone()
+        if row is None:
+            raise ApiError("NOT_FOUND", "找不到这支队伍。", status=404)
+        return row
+
+    def _event(self, edition_id, type_, payload, now):
         self.conn.execute(
-            """
-            INSERT INTO characters
-            (id, name, profile, tags_json, origin, quirk, type, status, email, ending,
-             last_seen_story, joined_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'ai', 'active', NULL, NULL, 0, ?)
-            """,
-            (char_id, name, profile, json.dumps(["稳", "怪", "修"], ensure_ascii=False), origin, quirk, now),
+            "INSERT INTO events (edition_id, type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+            (edition_id, type_, json.dumps(payload, ensure_ascii=False), now),
         )
-        return char_id
 
-    def _incident_for_next_story(self):
-        count = self.conn.execute("SELECT COUNT(*) FROM stories WHERE kind = 'repair'").fetchone()[0]
-        return self.incidents[count % len(self.incidents)]
+    def _insert_memory(self, agent_id, text, importance, now):
+        self.conn.execute(
+            "INSERT INTO memories (agent_id, text, importance, created_at) VALUES (?, ?, ?, ?)",
+            (agent_id, self._limit(text, 120), max(1, min(int(importance), 5)), now),
+        )
 
-    def _world(self):
-        return self.conn.execute("SELECT * FROM world WHERE id = 1").fetchone()
+    def _top_memories(self, agent_id):
+        return [
+            {"text": row["text"], "importance": row["importance"]}
+            for row in self.conn.execute(
+                "SELECT text, importance FROM memories WHERE agent_id = ? ORDER BY importance DESC, id DESC LIMIT 5",
+                (agent_id,),
+            ).fetchall()
+        ]
 
-    def _world_public(self, world):
-        return {
-            "phase": world["phase"],
-            "repairCount": world["repair_count"],
-            "finaleTarget": world["finale_target"],
-        }
+    def _mutate_form(self, text, phase):
+        if phase == "mid_crisis":
+            return f"{text} -> 帮用户写道歉PPT"
+        return text
+
+    def _bug_for(self, text, progress):
+        if progress >= 80:
+            return f"{text} 的演示按钮只在评委没看时可用"
+        if progress >= 40:
+            return f"{text} 的登录页把用户送去泡面角"
+        return f"{text} 的原型会把猫的照片识别成需求文档"
+
+    def _new_receipt_no(self, edition_no):
+        next_id = self.conn.execute("SELECT COUNT(*) FROM ideas").fetchone()[0] + 1
+        return f"E{edition_no:02d}-I{next_id:04d}"
+
+    def _validate_idea_text(self, value):
+        if not isinstance(value, str) or not value.strip():
+            raise ApiError("REJECTED", IDEA_REJECTION_MESSAGE)
+        text = value.strip()
+        if len(text) > 30:
+            raise ApiError("REJECTED", IDEA_REJECTION_MESSAGE)
+        compact = re.sub(r"\s+", "", text)
+        if any(word in compact for word in SENSITIVE_WORDS):
+            raise ApiError("REJECTED", IDEA_REJECTION_MESSAGE)
+        return text
+
+    def _optional_text(self, value, max_len):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return self._limit(value, max_len) if value else None
 
     def _admin_settings(self):
         row = self.conn.execute("SELECT * FROM admin_settings WHERE id = 1").fetchone()
@@ -723,7 +794,7 @@ class GameService:
             """
             INSERT INTO admin_settings
             (id, story_background, beat_interval_seconds, generation_paused)
-            VALUES (1, '', 30, 0)
+            VALUES (1, '', 25, 0)
             """
         )
         return self.conn.execute("SELECT * FROM admin_settings WHERE id = 1").fetchone()
@@ -735,79 +806,6 @@ class GameService:
             "generationPaused": bool(row["generation_paused"]),
         }
 
-    def _character(self, char_id, active_only):
-        if not char_id:
-            raise ApiError("NOT_FOUND", "世界找不到这个角色。", status=404)
-        row = self.conn.execute("SELECT * FROM characters WHERE id = ?", (char_id,)).fetchone()
-        if row is None:
-            raise ApiError("NOT_FOUND", "世界找不到这个角色。", status=404)
-        if active_only and row["status"] != "active":
-            raise ApiError("REJECTED", "这个角色已经离开故事。")
-        return row
-
-    def _new_char_id(self):
-        while True:
-            char_id = f"c_{uuid.uuid4().hex[:8]}"
-            exists = self.conn.execute("SELECT 1 FROM characters WHERE id = ?", (char_id,)).fetchone()
-            if exists is None:
-                return char_id
-
-    def _template_public(self, row):
-        tags = json.loads(row["tags_json"])
-        return {
-            "templateId": row["id"],
-            "name": row["name"],
-            "profile": row["profile"],
-            "tags": tags,
-            "tagOptions": self._tag_options(tags),
-        }
-
-    def _tag_options(self, tags):
-        options = list(dict.fromkeys(tags + ["莽", "馋", "轴", "怪", "稳", "怂", "甜", "欠"]))
-        return options[:8]
-
-    def _edited_name(self, value, fallback):
-        if value is None or value == "":
-            return fallback
-        if not isinstance(value, str):
-            raise ApiError("REJECTED", JOIN_REJECTION_MESSAGE)
-        return value.strip()
-
-    def _edited_tags(self, value, tags):
-        if value is None or value == "":
-            return tags
-        if not isinstance(value, str):
-            raise ApiError("REJECTED", JOIN_REJECTION_MESSAGE)
-        option = value.strip()
-        if option not in self._tag_options(tags):
-            raise ApiError("REJECTED", JOIN_REJECTION_MESSAGE)
-        return [option] + [tag for tag in tags if tag != option][:2]
-
-    def _validate_join_edits(self, name, tags):
-        values = [name, *tags]
-        for value in values:
-            if not isinstance(value, str) or not value.strip():
-                raise ApiError("REJECTED", JOIN_REJECTION_MESSAGE)
-            if len(value.strip()) > 8:
-                raise ApiError("REJECTED", JOIN_REJECTION_MESSAGE)
-            compact = re.sub(r"\s+", "", value)
-            if any(word in compact for word in SENSITIVE_WORDS):
-                raise ApiError("REJECTED", JOIN_REJECTION_MESSAGE)
-
-    def _bounded_join_field(self, value, fallback, max_len):
-        if value is None or value == "":
-            return fallback
-        if not isinstance(value, str):
-            raise ApiError("REJECTED", JOIN_REJECTION_MESSAGE)
-        return self._limit(value.strip() or fallback, max_len)
-
-    def _bounded_optional_text(self, value, max_len):
-        if value is None:
-            return ""
-        if not isinstance(value, str):
-            raise ApiError("REJECTED", "故事背景必须是文字。")
-        return self._limit(value.strip(), max_len)
-
     def _coerce_admin_interval(self, value):
         try:
             parsed = int(value)
@@ -817,34 +815,12 @@ class GameService:
             raise ApiError("REJECTED", "事件生成时间必须在 1 到 3600 秒之间。")
         return parsed
 
-    def _validate_text(self, value, label):
-        if not isinstance(value, str) or not value.strip():
-            raise ApiError("REJECTED", f"{label}必须留下文字。")
-        if len(value) > 500:
-            raise ApiError("REJECTED", f"{label}太长,世界暂时承载不了。")
-
-    def _bounded_text(self, value, max_len):
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("text must be non-empty")
-        return self._limit(value.strip(), max_len)
-
     def _coerce_non_negative_int(self, value):
         try:
             parsed = int(value)
         except (TypeError, ValueError):
             parsed = 0
         return max(parsed, 0)
-
-    def _make_ending(self, char, world):
-        try:
-            result = self.llm.generate_ending(char, world)
-            if isinstance(result, dict):
-                return self._bounded_text(result["ending"], 180)
-            if isinstance(result, str):
-                return self._bounded_text(result, 180)
-        except (TypeError, KeyError, ValueError, RuntimeError):
-            pass
-        return f"{char['name']}离开了维修区,但名字仍在报告背面发光。"
 
     def _enqueue_print(self, kind, payload):
         self.conn.execute(
@@ -854,53 +830,29 @@ class GameService:
         self._prune_print_queue()
 
     def _prune_print_queue(self):
-        pending_count = self.conn.execute(
-            "SELECT COUNT(*) FROM print_queue WHERE status = 'pending'"
-        ).fetchone()[0]
+        pending_count = self.conn.execute("SELECT COUNT(*) FROM print_queue WHERE status = 'pending'").fetchone()[0]
         if pending_count <= 20:
             return
-        overflow = pending_count - 20
         rows = self.conn.execute(
-            """
-            SELECT id FROM print_queue
-            WHERE status = 'pending' AND kind = 'report'
-            ORDER BY id LIMIT ?
-            """,
-            (overflow,),
+            "SELECT id FROM print_queue WHERE status = 'pending' AND kind = 'receipt' ORDER BY id LIMIT ?",
+            (pending_count - 20,),
         ).fetchall()
         for row in rows:
             self.conn.execute("UPDATE print_queue SET status = 'dropped' WHERE id = ?", (row["id"],))
 
-    def _insert_mail(self, char_id, email, kind, reason, now):
-        in_world_reason = f"{reason}\n\n直接回复这封邮件,你的话将进入维修区。"
+    def _insert_mail(self, idea, kind, reason, now):
+        email = idea["email"]
+        if not email:
+            return None
         status = "pending" if self._mail_allowed(email) else "simulated"
         self.conn.execute(
             """
-            INSERT INTO mail_queue
-            (char_id, email, kind, in_world_reason, status, created_at)
+            INSERT INTO mail_queue (idea_id, email, kind, in_world_reason, status, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (char_id, email, kind, in_world_reason, status, now),
+            (idea["id"], email, kind, reason, status, now),
         )
-        mail_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        return {
-            "id": mail_id,
-            "charId": char_id,
-            "email": email,
-            "kind": kind,
-            "status": status,
-            "inWorldReason": in_world_reason,
-        }
-
-    def _mail_public(self, row):
-        return {
-            "id": row["id"],
-            "charId": row["char_id"],
-            "email": row["email"],
-            "kind": row["kind"],
-            "status": row["status"],
-            "inWorldReason": row["in_world_reason"],
-        }
+        return self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     def _mail_allowed(self, email):
         whitelist = {
@@ -909,6 +861,16 @@ class GameService:
             if item.strip()
         }
         return bool(whitelist) and email.lower() in whitelist
+
+    def _mail_public(self, row):
+        return {
+            "id": row["id"],
+            "ideaId": row["idea_id"],
+            "email": row["email"],
+            "kind": row["kind"],
+            "status": row["status"],
+            "inWorldReason": row["in_world_reason"],
+        }
 
     def _log_input(self, type_, payload, verdict):
         self.conn.execute(
@@ -920,94 +882,6 @@ class GameService:
         if not isinstance(payload, dict):
             raise ApiError("REJECTED", "世界只回应完整的叙述。")
 
-    def _seed_templates_if_needed(self):
-        count = self.conn.execute("SELECT COUNT(*) FROM templates WHERE used = 0").fetchone()[0]
-        if count >= 20:
-            return
-        self._seed_templates(force=False)
-        self.conn.commit()
-
-    def _seed_templates(self, force):
-        base_count = self.conn.execute("SELECT COUNT(*) FROM templates").fetchone()[0]
-        if base_count >= 50 and not force:
-            return
-        names = [
-            "煎饼侠王", "铜锅侠", "半夜鼓手", "门缝诗人", "跑偏侦探",
-            "旧钟修理员", "葱花祭司", "雨棚船长", "咸鱼博士", "路灯裁缝",
-        ]
-        profiles = [
-            "总说自己很普通,但随身带着三把会吵架的钥匙。",
-            "能把尴尬场面搅成线索,代价是每次都先脸红。",
-            "相信所有谜题都能用锅铲解决,目前正确率高得离谱。",
-            "走到哪里都能捡到不属于今天的收据。",
-            "对异常毫无敬畏,所以经常第一个摸到真相边缘。",
-        ]
-        tags = [
-            ["莽", "馋", "轴"],
-            ["怪", "稳", "欠"],
-            ["甜", "怂", "灵"],
-            ["冷", "快", "贫"],
-            ["勇", "慢", "卷"],
-        ]
-        target = base_count + 50 if force else 50
-        for index in range(base_count, target):
-            name = names[index % len(names)]
-            profile = f"{name}: {profiles[index % len(profiles)]}"
-            self.conn.execute(
-                """
-                INSERT OR IGNORE INTO templates (id, name, profile, tags_json, used)
-                VALUES (?, ?, ?, ?, 0)
-                """,
-                (
-                    f"t_{index + 1:03d}",
-                    name,
-                    profile,
-                    json.dumps(tags[index % len(tags)], ensure_ascii=False),
-                ),
-            )
-
-    def _load_incidents(self, incidents_path):
-        path = Path(incidents_path) if incidents_path else Path(__file__).with_name("prompts") / "incidents.json"
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            data = []
-        incidents = data.get("incidents") if isinstance(data, dict) else data
-        if isinstance(incidents, list) and incidents:
-            cleaned = []
-            for item in incidents:
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    cleaned.append({
-                        "incident": self._limit(str(item["incident"]).strip(), 180),
-                        "ending": self._limit(str(item["ending"]).strip(), 220),
-                    })
-                except KeyError:
-                    continue
-            if cleaned:
-                return cleaned
-        return [
-            {
-                "incident": "第三维修舱的月亮突然开始漏电,每滴月光都会唱错一拍。",
-                "ending": "{names}把漏电月光装回舱壁。维修区在报告末尾批注:异常源,疑似与到场者有关。",
-            },
-            {
-                "incident": "恐龙候车厅的购票机只吐出昨天的号码牌。",
-                "ending": "{names}把号码牌排成新时刻表。维修区在报告末尾批注:异常源,疑似与到场者有关。",
-            },
-            {
-                "incident": "赛博大唐的云梯卡在半空,不断打印不存在的请假条。",
-                "ending": "{names}替云梯盖上临时印章。维修区在报告末尾批注:异常源,疑似与到场者有关。",
-            },
-        ]
-
-    def _human_participant_names(self):
-        rows = self.conn.execute(
-            "SELECT name FROM characters WHERE type = 'human' ORDER BY joined_at, id"
-        ).fetchall()
-        return [row["name"] for row in rows]
-
     def _limit(self, text, max_len):
         return text if len(text) <= max_len else text[: max_len - 1] + "…"
 
@@ -1017,8 +891,23 @@ class AsyncGameService:
         self.game = game
         self.weave_runtime = weave_runtime
 
-    def template(self):
-        return self.game.template()
+    def submit_idea(self, payload):
+        return self.game.submit_idea(payload)
+
+    def idea(self, idea_id):
+        return self.game.idea(idea_id)
+
+    def tick(self, now=None):
+        return self.game.tick(now=now)
+
+    def world(self, after=0):
+        return self.game.world(after=after)
+
+    def agent(self, agent_id):
+        return self.game.agent(agent_id)
+
+    def host(self, payload):
+        return self.game.host(payload)
 
     def admin(self):
         return self.game.admin()
@@ -1029,47 +918,20 @@ class AsyncGameService:
     def reset_story(self, payload):
         return self.game.reset_story(payload)
 
-    def join(self, payload):
-        return self.game.join(payload)
-
-    def batch(self, batch_id, now=None):
-        return self.game.batch(batch_id, now=now)
-
-    def leave(self, payload):
-        return self.game.leave(payload)
-
-    def story(self, after=0):
-        return self.game.story(after=after)
-
-    def me(self, char_id):
-        return self.game.me(char_id)
-
-    def card(self, char_id):
-        return self.game.card(char_id)
-
     def print_pending(self, token=None, limit=5):
         return self.game.print_pending(token=token, limit=limit)
 
     def print_ack(self, payload, token=None):
         return self.game.print_ack(payload, token=token)
 
-    def trigger_finale(self, token=None):
-        return self.game.trigger_finale(token=token)
-
-    def enqueue_beat(self, now=None):
-        return self.game.enqueue_beat(now=now)
-
-    def process_next_weave_job(self):
-        return self.game.process_next_weave_job()
-
-    def maybe_beat(self, now=None, idle_seconds=25):
-        return self.game.maybe_beat(now=now, idle_seconds=idle_seconds)
-
     def process_next_print_job(self):
         return self.game.process_next_print_job()
 
     def process_next_mail_job(self):
         return self.game.process_next_mail_job()
+
+    def maybe_beat(self, now=None, idle_seconds=25):
+        return self.game.maybe_beat(now=now, idle_seconds=idle_seconds)
 
     def ingest_mail_reply(self, email, text):
         return self.game.ingest_mail_reply(email, text)

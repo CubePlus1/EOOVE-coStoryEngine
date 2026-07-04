@@ -25,33 +25,26 @@ def create_handler(game, static_root=None):
         def do_GET(self):
             try:
                 parsed = urlparse(self.path)
-                if parsed.path == "/api/story":
+                if parsed.path == "/api/world":
                     query = parse_qs(parsed.query)
                     after = query.get("after", ["0"])[0]
-                    self._send_json(200, self.service.story(after=after))
-                    return
-                if parsed.path.startswith("/api/batch/"):
-                    batch_id = parsed.path.rsplit("/", 1)[-1]
-                    self._send_json(200, self.service.batch(batch_id))
+                    self._send_json(200, self.service.world(after=after))
                     return
                 if parsed.path == "/api/print/pending":
                     query = parse_qs(parsed.query)
                     limit = query.get("limit", ["5"])[0]
                     self._send_json(200, self.service.print_pending(limit=limit))
                     return
-                if parsed.path == "/api/template":
-                    self._send_json(200, self.service.template())
-                    return
                 if parsed.path == "/api/admin":
                     self._send_json(200, self.service.admin())
                     return
-                if parsed.path.startswith("/api/me/"):
-                    char_id = parsed.path.rsplit("/", 1)[-1]
-                    self._send_json(200, self.service.me(char_id))
+                if parsed.path.startswith("/api/idea/"):
+                    idea_id = parsed.path.rsplit("/", 1)[-1]
+                    self._send_json(200, self.service.idea(idea_id))
                     return
-                if parsed.path.startswith("/api/card/"):
-                    char_id = parsed.path.rsplit("/", 1)[-1]
-                    self._send_json(200, self.service.card(char_id))
+                if parsed.path.startswith("/api/agent/"):
+                    agent_id = parsed.path.rsplit("/", 1)[-1]
+                    self._send_json(200, self.service.agent(agent_id))
                     return
                 if parsed.path.startswith("/api/"):
                     raise ApiError("NOT_FOUND", "世界没有这条道路。", status=404)
@@ -69,11 +62,8 @@ def create_handler(game, static_root=None):
                 parsed = urlparse(self.path)
                 self._enforce_rate_limit(parsed.path)
                 payload = self._read_json()
-                if parsed.path == "/api/join":
-                    self._send_json(200, self.service.join(payload))
-                    return
-                if parsed.path == "/api/leave":
-                    self._send_json(200, self.service.leave(payload))
+                if parsed.path == "/api/idea":
+                    self._send_json(200, self.service.submit_idea(payload))
                     return
                 if parsed.path == "/api/mail/reply":
                     self._send_json(200, self.service.ingest_mail_reply(
@@ -90,8 +80,8 @@ def create_handler(game, static_root=None):
                 if parsed.path == "/api/print/ack":
                     self._send_json(200, self.service.print_ack(payload))
                     return
-                if parsed.path == "/api/finale":
-                    self._send_json(200, self.service.trigger_finale())
+                if parsed.path == "/api/host":
+                    self._send_json(200, self.service.host(payload))
                     return
                 raise ApiError("NOT_FOUND", "世界没有这条道路。", status=404)
             except ApiError as error:
@@ -112,7 +102,7 @@ def create_handler(game, static_root=None):
             return json.loads(raw.decode("utf-8"))
 
         def _enforce_rate_limit(self, path):
-            if path not in {"/api/join", "/api/leave", "/api/mail/reply", "/api/admin", "/api/admin/reset", "/api/print/ack", "/api/finale"}:
+            if path not in {"/api/idea", "/api/mail/reply", "/api/admin", "/api/admin/reset", "/api/print/ack", "/api/host"}:
                 return
             client = self.client_address[0] if self.client_address else "unknown"
             key = f"{client}:{path}"
