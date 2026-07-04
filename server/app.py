@@ -30,6 +30,18 @@ def create_handler(game, static_root=None):
                     after = query.get("after", ["0"])[0]
                     self._send_json(200, self.service.story(after=after))
                     return
+                if parsed.path.startswith("/api/batch/"):
+                    batch_id = parsed.path.rsplit("/", 1)[-1]
+                    self._send_json(200, self.service.batch(batch_id))
+                    return
+                if parsed.path == "/api/print/pending":
+                    query = parse_qs(parsed.query)
+                    limit = query.get("limit", ["5"])[0]
+                    self._send_json(200, self.service.print_pending(
+                        token=self.headers.get("X-Print-Token"),
+                        limit=limit,
+                    ))
+                    return
                 if parsed.path == "/api/template":
                     self._send_json(200, self.service.template())
                     return
@@ -78,6 +90,17 @@ def create_handler(game, static_root=None):
                 if parsed.path == "/api/admin/reset":
                     self._send_json(200, self.service.reset_story(payload))
                     return
+                if parsed.path == "/api/print/ack":
+                    self._send_json(200, self.service.print_ack(
+                        payload,
+                        token=self.headers.get("X-Print-Token"),
+                    ))
+                    return
+                if parsed.path == "/api/finale":
+                    self._send_json(200, self.service.trigger_finale(
+                        token=self.headers.get("X-Print-Token"),
+                    ))
+                    return
                 raise ApiError("NOT_FOUND", "世界没有这条道路。", status=404)
             except ApiError as error:
                 self._send_json(error.status, error.envelope())
@@ -97,7 +120,7 @@ def create_handler(game, static_root=None):
             return json.loads(raw.decode("utf-8"))
 
         def _enforce_rate_limit(self, path):
-            if path not in {"/api/join", "/api/leave", "/api/mail/reply", "/api/admin", "/api/admin/reset"}:
+            if path not in {"/api/join", "/api/leave", "/api/mail/reply", "/api/admin", "/api/admin/reset", "/api/print/ack", "/api/finale"}:
                 return
             client = self.client_address[0] if self.client_address else "unknown"
             key = f"{client}:{path}"

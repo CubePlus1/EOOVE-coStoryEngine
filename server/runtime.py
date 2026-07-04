@@ -43,7 +43,7 @@ class BackgroundRuntime:
     def wait_until_idle(self, timeout=2.0):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if self._print_pending_count() == 0 and self._beat_exists():
+            if self._print_pending_count() == 0:
                 return True
             time.sleep(min(self.beat_interval, self.print_interval, self.mail_interval, 0.01))
         return False
@@ -70,13 +70,6 @@ class BackgroundRuntime:
             return self.game.conn.execute(
                 "SELECT COUNT(*) FROM print_queue WHERE status = 'pending'"
             ).fetchone()[0]
-
-    def _beat_exists(self):
-        with self.game.lock:
-            row = self.game.conn.execute(
-                "SELECT 1 FROM acts WHERE type = 'beat' LIMIT 1"
-            ).fetchone()
-        return row is not None
 
 
 class WeaveWorkerRuntime:
@@ -107,16 +100,7 @@ class WeaveWorkerRuntime:
         return any(thread.is_alive() for thread in self._threads)
 
     def wait_until_idle(self, timeout=2.0):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            with self.game.lock:
-                pending = self.game.conn.execute(
-                    "SELECT COUNT(*) FROM weave_queue WHERE status IN ('pending', 'running')"
-                ).fetchone()[0]
-            if pending == 0:
-                return True
-            time.sleep(0.01)
-        return False
+        return True
 
     def _loop(self):
         while not self._stop.is_set():

@@ -10,17 +10,18 @@
 
 - Trigger: backend work that adds HTTP routes, SQLite schema, queue workers, external integrations, or demo hardening.
 - Keep the backend dependency-light: use Python stdlib first (`http.server`, `sqlite3`, `threading`, `smtplib`, `subprocess`) and inject adapters so tests remain deterministic.
-- Current product loop is v2 open world: template card draw -> join -> first act -> global beats -> clue progression -> twist/reveal. Do not reintroduce v1 cycle/round/hope/location/oracle/node/settlement semantics.
+- Current product loop is v3 cosmic repair zone: template card draw -> join current batch -> batch gathers 3 humans or times out -> AI residents fill to 3 -> one whole repair story is woven -> one new rule is added to the rule ledger. Do not reintroduce v1 cycle/round/hope/location/oracle/node/settlement semantics or v2 acts/clue/twist/reveal/chapter fill semantics.
 
 ### 2. Signatures
 
 - HTTP handler factory: `create_handler(service)`.
-- Core service: `GameService(db_path="server/db.sqlite", llm=None, mail_transport=None, printer_driver=None, legends_path=None)`.
+- Core service: `GameService(db_path="server/db.sqlite", llm=None, mail_transport=None, printer_driver=None, legends_path=None, incidents_path=None, print_token=None)`.
 - Production wrapper: `AsyncGameService(game, weave_runtime=None)`.
 - Public API routes:
   - `GET /api/template -> { templateId, name, profile, tags, tagOptions }`
-  - `POST /api/join { templateId, edits?: { name?, tagSwap? }, email? } -> { charId, name, profile, tags, firstActId }`
-  - `GET /api/story?after=<actId> -> { world, acts, characters }`
+  - `POST /api/join { templateId, edits?: { name?, tagSwap? }, origin?, quirk?, email? } -> { charId, batchId, etaSeconds, name, profile, origin, quirk }`
+  - `GET /api/batch/:batchId -> { status, countdown, members, storyId? }`
+  - `GET /api/story?after=<storyId> -> { world, rules, stories }`
   - `GET /api/me/:charId`
   - `GET /api/card/:charId`
   - `POST /api/leave`
@@ -28,10 +29,11 @@
   - `GET /api/admin -> { storyBackground, beatIntervalSeconds, generationPaused, stats }`
   - `POST /api/admin { storyBackground?, beatIntervalSeconds?, generationPaused? } -> admin state`
   - `POST /api/admin/reset { confirm: "RESET" } -> admin state with reset: true`
+  - `GET /api/print/pending?limit=5` with `X-Print-Token`
+  - `POST /api/print/ack { ticketIds: [] }` with `X-Print-Token`
+  - `POST /api/finale` with `X-Print-Token`
 - Removed API route: `POST /api/act` must return `NOT_FOUND`.
 - Queue workers:
-  - `enqueue_beat(now=None) -> dict`
-  - `process_next_weave_job() -> dict | None`
   - `process_next_print_job() -> dict | None`
   - `process_next_mail_job() -> dict | None`
 - External adapters:
@@ -43,19 +45,19 @@
 ### 3. Contracts
 
 - API errors use `{ "error": { "code": "...", "message": "..." } }`.
-- v2 world response is `{ legend, clueCount, nextTwistAt, nextRevealAt, actSeq }`.
-- v2 act response includes `id`, `seq`, `type`, `narrative`, `chronicle`, `involved`, `importance`; it must not include `location` or `directive`.
-- v2 act types are `act | twist | reveal | beat`.
-- SQLite v2 schema owns:
-  - `world(id, legend_index, legend_text, clue_count, act_seq)`
+- v3 world response is `{ phase, repairCount, finaleTarget }`.
+- v3 story response includes `id`, `kind`, `incident`, `segments`, `members`, `rule`, `personal`; it must not include `acts`, `location`, or `directive`.
+- SQLite v3 schema owns:
+  - `world(id, phase, repair_count, finale_target)`
   - `templates(id, name, profile, tags_json, used)`
-  - `characters(..., tags_json, last_seen_act, joined_at)`
-  - `acts(seq, type, narrative, chronicle, involved_json, personal_json, importance, print_json, created_at)`
-  - `weave_queue`
+  - `characters(..., tags_json, origin, quirk, last_seen_story, joined_at)`
+  - `batches`, `batch_members`
+  - `stories(kind, incident, segments_json, members_json, rule_id, personal_json, created_at)`
+  - `rules(story_id, text, created_at)`
   - `admin_settings(id, story_background, beat_interval_seconds, generation_paused)`
 - Legacy v1 tables may be archived with `_v1_backup` suffix during initialization; do not silently reuse v1 columns.
-- Clue progression: each story act increments `clue_count`; clue 8 inserts a `twist` act and updates `world.legend_text`; clue 20 inserts a `reveal`, enqueues a reveal ticket, rotates to the next legend, and resets clue count to 0.
-- Admin settings control the live demo: `generation_paused` blocks beat enqueueing, `beat_interval_seconds` controls background beat timing, and `story_background` is injected into the weaver context.
+- Print proxy is pull-based: cloud never pushes to local printers. `X-Print-Token` gates pending/ack/finale endpoints; ack is idempotent. Pending queue preserves `charcard`, `report`, and `finale`; when backlog exceeds 20, drop `report` first.
+- Admin settings control the live demo: `generation_paused` is retained for admin pause state, `beat_interval_seconds` controls background runtime timing, and `story_background` is injected into the weaver context.
 - Story reset is a dangerous operation and must require exact `confirm: "RESET"`; reset clears story state and queues but preserves admin settings.
 - Queue failure semantics:
   - Printer driver failure leaves `print_queue.status = 'pending'` for retry.
@@ -78,7 +80,7 @@
 ### 4. Validation & Error Matrix
 
 - Oversized HTTP body -> HTTP 413 with `REJECTED`; do not dispatch to game logic.
-- Mutating route rate limit exceeded -> HTTP 429 with `QUOTA`; do not create characters, acts, or queue rows.
+- Mutating route rate limit exceeded -> HTTP 429 with `QUOTA`; do not create characters, stories, batches, or queue rows.
 - Unknown character/email/template -> `NOT_FOUND`.
 - Invalid join payload or edits -> `REJECTED`.
 - Join edit sensitive word or >8 chars -> `{ error: { code: "REJECTED", message: "这个名字被世界吞掉了,换一个吧" } }`.
@@ -91,7 +93,7 @@
 ### 5. Good/Base/Bad Cases
 
 - Good: adapter injected in tests, fake raises once, queue row remains pending, second call succeeds.
-- Good: `POST /api/join` consumes exactly one template and returns `firstActId` for same-page reveal.
+- Good: `POST /api/join` consumes exactly one template and returns `batchId` plus `etaSeconds` for the gathering page.
 - Base: no external env configured, deterministic fallback still supports local demo flow.
 - Bad: external side effect happens before persistence validation or failure marks a queue row as completed.
 - Bad: adding v1 fields (`round`, `cycle`, `hopeHint`, `locations`, `directive`) to `/api/story`.
@@ -105,8 +107,8 @@
   - template draw and join consumption,
   - local join edit rejection with no mutation,
   - story response shape,
-  - twist/reveal clue progression,
-  - global beat queue and cold character selection,
+  - batch gathering, timeout AI fill, full-story weaving, rule ledger,
+  - print proxy pending/ack token enforcement,
   - admin pause/start, beat interval, background injection, and reset confirmation,
   - print/mail failure retry.
 - Async production wrapper tests for behavior that differs from synchronous `GameService`.
@@ -146,5 +148,5 @@ This leaks removed v1 mechanics back into the API.
 #### Correct
 
 ```python
-return {"world": {"legend": legend, "clueCount": 3, "nextTwistAt": 8, "nextRevealAt": 20, "actSeq": 42}}
+return {"world": {"phase": "running", "repairCount": 3, "finaleTarget": 10}}
 ```

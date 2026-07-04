@@ -5,10 +5,9 @@ from pathlib import Path
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS world (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  legend_index INTEGER NOT NULL DEFAULT 0,
-  legend_text TEXT NOT NULL,
-  clue_count INTEGER NOT NULL DEFAULT 0,
-  act_seq INTEGER NOT NULL DEFAULT 0
+  phase TEXT NOT NULL DEFAULT 'running',
+  repair_count INTEGER NOT NULL DEFAULT 0,
+  finale_target INTEGER NOT NULL DEFAULT 10
 );
 
 CREATE TABLE IF NOT EXISTS admin_settings (
@@ -31,44 +30,48 @@ CREATE TABLE IF NOT EXISTS characters (
   name TEXT NOT NULL,
   profile TEXT NOT NULL,
   tags_json TEXT NOT NULL,
+  origin TEXT NOT NULL DEFAULT '宇宙临时维修区',
+  quirk TEXT NOT NULL DEFAULT '',
   type TEXT NOT NULL,
   status TEXT NOT NULL,
   email TEXT,
   ending TEXT,
-  last_seen_act INTEGER NOT NULL DEFAULT 0,
+  last_seen_story INTEGER NOT NULL DEFAULT 0,
   joined_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS acts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  seq INTEGER NOT NULL,
+CREATE TABLE IF NOT EXISTS batches (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  deadline_at INTEGER NOT NULL,
+  story_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS batch_members (
+  batch_id TEXT NOT NULL,
+  char_id TEXT NOT NULL,
   type TEXT NOT NULL,
-  narrative TEXT NOT NULL,
-  chronicle TEXT,
-  involved_json TEXT NOT NULL,
-  personal_json TEXT,
-  importance INTEGER NOT NULL,
-  print_json TEXT,
+  joined_at INTEGER NOT NULL,
+  PRIMARY KEY (batch_id, char_id)
+);
+
+CREATE TABLE IF NOT EXISTS rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  story_id INTEGER,
+  text TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS triples (
+CREATE TABLE IF NOT EXISTS stories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  subject TEXT,
-  relation TEXT,
-  object TEXT,
-  act_id INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS weave_queue (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  priority INTEGER NOT NULL DEFAULT 100,
-  created_at INTEGER NOT NULL,
-  started_at INTEGER,
-  completed_at INTEGER
+  kind TEXT NOT NULL DEFAULT 'repair',
+  incident TEXT NOT NULL,
+  segments_json TEXT NOT NULL,
+  members_json TEXT NOT NULL,
+  rule_id INTEGER,
+  personal_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS print_queue (
@@ -107,15 +110,14 @@ def connect(db_path):
     return conn
 
 
-def initialize(conn, initial_legend):
-    _archive_v1_tables(conn)
+def initialize(conn):
+    _archive_legacy_tables(conn)
     conn.executescript(SCHEMA)
     conn.execute(
         """
-        INSERT OR IGNORE INTO world (id, legend_index, legend_text, clue_count, act_seq)
-        VALUES (1, 0, ?, 0, 0)
-        """,
-        (initial_legend,),
+        INSERT OR IGNORE INTO world (id, phase, repair_count, finale_target)
+        VALUES (1, 'running', 0, 10)
+        """
     )
     conn.execute(
         """
@@ -127,7 +129,7 @@ def initialize(conn, initial_legend):
     conn.commit()
 
 
-def _archive_v1_tables(conn):
+def _archive_legacy_tables(conn):
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'world'"
     ).fetchone()
@@ -137,7 +139,7 @@ def _archive_v1_tables(conn):
         item["name"]
         for item in conn.execute("PRAGMA table_info(world)").fetchall()
     }
-    if "legend_index" in columns:
+    if {"phase", "repair_count", "finale_target"}.issubset(columns):
         return
     for table in [
         "world",
@@ -145,6 +147,7 @@ def _archive_v1_tables(conn):
         "acts",
         "oracle_pool",
         "triples",
+        "weave_queue",
         "print_queue",
         "mail_queue",
         "location_seed_queue",
@@ -156,13 +159,13 @@ def _archive_v1_tables(conn):
         ).fetchone()
         if exists is None:
             continue
-        backup = f"{table}_v1_backup"
+        backup = f"{table}_v2_backup"
         suffix = 1
         while conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
             (backup,),
         ).fetchone():
             suffix += 1
-            backup = f"{table}_v1_backup_{suffix}"
+            backup = f"{table}_v2_backup_{suffix}"
         conn.execute(f"ALTER TABLE {table} RENAME TO {backup}")
     conn.commit()
