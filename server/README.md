@@ -1,12 +1,13 @@
 # EOOVE coStory Engine Backend
 
 Dependency-light Python backend for the v4 "hackathon inside a hackathon"
-story engine.
+project engine.
 
-The backend owns the simulated hackathon world: editions, phases, AI hackers,
-AI judges, teams, submitted ideas, agent conversations, memories, project
-progress, print tickets, mail notifications, and admin controls. The frontend
-talks to this service through JSON APIs under `/api/*`.
+The backend owns the simulated hackathon workspace: editions, phases, AI
+hackers, AI judges, teams, submitted ideas, project tasks, commit logs,
+generated demo artifacts, agent conversations, memories, print tickets, mail
+notifications, and admin controls. The frontend talks to this service through
+JSON APIs under `/api/*`.
 
 ## Run
 
@@ -28,7 +29,7 @@ EOOVE_HOST=0.0.0.0 EOOVE_PORT=8000 EOOVE_DB_PATH=server/demo.sqlite python3 -m s
 ```
 
 The app uses local SQLite storage by default. If `EOOVE_DB_PATH` points to a
-file, the backend creates parent directories and persists story state across
+file, the backend creates parent directories and persists project state across
 process restarts.
 
 ## Environment
@@ -52,26 +53,33 @@ process restarts.
 One edition is a simulated AI hackathon. The backend seeds AI hackers and
 judges, forms teams, accepts audience ideas, then advances through six phases:
 
-1. `opening`
-2. `early_dev`
-3. `mid_crisis`
-4. `deadline`
-5. `pitch`
-6. `awards`
+1. `opening` - 2 minutes
+2. `early_dev` - 4 minutes
+3. `mid_crisis` - 3 minutes
+4. `deadline` - 2 minutes
+5. `pitch` - 3 minutes
+6. `awards` - 1 minute
+
+One edition is budgeted to 15 minutes for the first demo build.
 
 Audience flow:
 
 1. Submit an idea with optional investor name and email.
 2. Receive an idea id and receipt number immediately.
 3. A receipt print ticket is queued.
-4. On the next tick, AI teams claim waiting ideas and agents gossip about them.
-5. Project progress and bugs update over time.
-6. During `pitch` and `awards`, ideas receive reviews, ranks, certificate print
-   tickets, leaderboard tickets, and optional mail notifications.
+4. On the next tick, AI teams claim waiting ideas and split project tasks.
+5. Agents write task outputs and commit logs while updating a real demo
+   artifact.
+6. Each claimed idea gets a self-contained HTML demo URL that can be opened or
+   embedded.
+7. During `pitch` and `awards`, judges review the current artifact; ideas
+   receive reviews, ranks, certificate print tickets, leaderboard tickets, and
+   optional mail notifications.
 
 The backend keeps the demo running without an LLM endpoint. If the LLM is not
-configured or returns malformed output, deterministic fallback dialogue still
-writes conversations, memories, intents, project updates, and events.
+configured or returns malformed output, deterministic fallback still writes
+tasks, commits, HTML artifacts, conversations, memories, intents, project
+updates, and events.
 
 ## API
 
@@ -124,10 +132,19 @@ Response:
 ```json
 {
   "status": "developing",
+  "projectId": 1,
   "teamName": "泡面独角兽",
   "currentForm": "给猫做相亲App",
   "progress": 18,
   "currentBug": "给猫做相亲App 的原型会把猫的照片识别成需求文档",
+  "artifact": {
+    "artifactId": 1,
+    "type": "html",
+    "title": "给猫做相亲App Demo",
+    "summary": "泡面独角兽 做出的可演示原型: 给猫做相亲App",
+    "version": 2,
+    "url": "/api/artifact/1"
+  },
   "gossip": ["泡面角有人提到了你的idea: 给猫做相亲App"],
   "review": null,
   "rank": null
@@ -166,11 +183,14 @@ Response:
   ],
   "projects": [
     {
+      "projectId": 1,
+      "ideaId": 1,
       "teamName": "泡面独角兽",
       "ideaText": "给猫做相亲App",
       "currentForm": "给猫做相亲App",
       "progress": 18,
-      "currentBug": "..."
+      "currentBug": "...",
+      "artifact": {"artifactId": 1, "type": "html", "url": "/api/artifact/1"}
     }
   ],
   "events": [
@@ -181,6 +201,82 @@ Response:
 
 The `after` cursor is an event id. The endpoint returns up to 100 events with
 `id > after`.
+
+### Project Detail
+
+```http
+GET /api/project/1
+```
+
+Response:
+
+```json
+{
+  "projectId": 1,
+  "ideaId": 1,
+  "receiptNo": "E01-I0001",
+  "teamName": "泡面独角兽",
+  "ideaText": "给猫做相亲App",
+  "currentForm": "给猫做相亲App",
+  "progress": 18,
+  "currentBug": "...",
+  "tasks": [
+    {
+      "id": 1,
+      "title": "产品定义",
+      "ownerAgentId": "h_backend",
+      "status": "done",
+      "output": "MVP 不是完整实现...,而是展示用户输入后得到一个可解释结果。"
+    }
+  ],
+  "commits": [
+    {
+      "id": 1,
+      "agentId": "h_backend",
+      "message": "完成产品定义",
+      "diffSummary": "MVP 不是完整实现...",
+      "artifactId": null,
+      "createdAt": 1783152000
+    }
+  ],
+  "artifact": {
+    "artifactId": 1,
+    "type": "html",
+    "title": "给猫做相亲App Demo",
+    "summary": "泡面独角兽 做出的可演示原型: 给猫做相亲App",
+    "version": 2,
+    "url": "/api/artifact/1"
+  }
+}
+```
+
+The project id is currently the idea id. Tasks, commits, and artifacts are
+stored in SQLite and survive process restarts.
+
+### Artifact
+
+```http
+GET /api/artifact/1
+```
+
+Response:
+
+```json
+{
+  "artifactId": 1,
+  "ideaId": 1,
+  "version": 2,
+  "type": "html",
+  "title": "给猫做相亲App Demo",
+  "summary": "泡面独角兽 做出的可演示原型: 给猫做相亲App",
+  "contentType": "text/html; charset=utf-8",
+  "body": "<!doctype html>..."
+}
+```
+
+Artifacts are actual self-contained HTML demos. They are not guaranteed to be a
+complete or perfectly faithful implementation of the submitted idea, but every
+claimed project must have something visible and runnable.
 
 ### Agent Detail
 
@@ -269,9 +365,9 @@ POST /api/admin/reset
 {"confirm":"RESET"}
 ```
 
-Reset clears editions, agents, teams, ideas, memories, conversations, events,
-print queue, mail queue, and input logs, then starts a fresh first edition.
-Admin settings are preserved.
+Reset clears editions, agents, teams, ideas, project tasks, project commits,
+artifacts, memories, conversations, events, print queue, mail queue, and input
+logs, then starts a fresh first edition. Admin settings are preserved.
 
 ### Print Proxy
 
@@ -297,7 +393,9 @@ Response:
       "receiptNo": "E01-I0001",
       "idea": "给猫做相亲App",
       "investorName": "七色",
-      "editionNo": 1
+      "editionNo": 1,
+      "trackingId": "E01-I0001",
+      "qrUrl": "/idea/1?receipt=E01-I0001"
     }
   }
 ]
@@ -381,7 +479,7 @@ rows are stored as `simulated`.
 - Print loop: calls `process_next_print_job()`.
 - Mail loop: calls `process_next_mail_job()`.
 
-`generationPaused = true` stops story ticks but does not stop print or mail
+`generationPaused = true` stops project ticks but does not stop print or mail
 processing.
 
 ## LLM Payload
@@ -409,7 +507,8 @@ For conversation weaving, a valid result may include:
 }
 ```
 
-Malformed or missing results fall back to deterministic local dialogue.
+Malformed or missing results fall back to deterministic local dialogue. Project
+tasks, commits, and artifacts are still produced even when there is no LLM.
 
 ## Database
 
@@ -420,6 +519,9 @@ SQLite is initialized automatically on startup. The v4 core tables are:
 - `teams`: team membership and claimed idea.
 - `ideas`: submitted idea, investor metadata, receipt, status, progress, bug,
   review, and rank.
+- `project_tasks`: agent-owned work items for each project.
+- `project_commits`: agent commit log and artifact release history.
+- `artifacts`: self-contained HTML demos and metadata.
 - `memories`: per-agent memory stream.
 - `conversations`: generated dialogue lines.
 - `events`: incremental world stream cursor.

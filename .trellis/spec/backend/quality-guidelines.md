@@ -14,11 +14,12 @@
 - Keep the backend dependency-light: use Python stdlib first (`http.server`,
   `sqlite3`, `threading`, `smtplib`, `subprocess`) and inject adapters so tests
   remain deterministic.
-- Current product loop is v4 AI hackathon simulation: edition -> phase -> tick
-  -> agent conversation/memory/project progress -> pitch -> awards -> next
-  edition. Do not reintroduce v1 cycle/round/hope/oracle/node/settlement
-  semantics, v2 chapter sandwich mechanics, or v3 repair-zone template/batch
-  story/rule-ledger mechanics.
+- Current product loop is v4 AI hackathon project execution: edition -> phase
+  -> tick -> team claims idea -> agents complete tasks and commits -> HTML
+  artifact updates -> pitch -> awards -> next edition. Conversation is
+  collaboration telemetry, not the primary product. Do not reintroduce v1
+  cycle/round/hope/oracle/node/settlement semantics, v2 chapter sandwich
+  mechanics, or v3 repair-zone template/batch story/rule-ledger mechanics.
 
 ### 2. Signatures
 
@@ -28,8 +29,10 @@
 - Production wrapper: `AsyncGameService(game, weave_runtime=None)`.
 - Public API routes:
   - `POST /api/idea { text, investorName?, email? } -> { ideaId, receiptNo }`
-  - `GET /api/idea/:id -> { status, teamName?, currentForm, progress, currentBug, gossip, review?, rank? }`
+  - `GET /api/idea/:id -> { ideaId, receiptNo, status, teamName?, projectId?, currentForm, progress, currentBug, artifact?, gossip, review?, rank? }`
   - `GET /api/world?after=<eventId> -> { edition, agents, conversations, projects, events }`
+  - `GET /api/project/:id -> { projectId, ideaId, receiptNo, teamName, ideaText, currentForm, progress, currentBug, tasks, commits, artifact }`
+  - `GET /api/artifact/:id -> { artifactId, ideaId, version, type, title, summary, contentType, body }`
   - `GET /api/agent/:id -> { card, intent, memories }`
   - `POST /api/host { action: "start"|"skip_phase"|"finale", phase? } -> { edition }`
   - `GET /api/print/pending?limit=<n> -> [{ ticketId, kind, payload }]`
@@ -59,7 +62,8 @@
 
 - API errors use `{ "error": { "code": "...", "message": "..." } }`.
 - v4 phases are `opening`, `early_dev`, `mid_crisis`, `deadline`, `pitch`,
-  `awards`.
+  `awards`. The initial demo budget is exactly 15 minutes per edition:
+  2 + 4 + 3 + 2 + 3 + 1 minutes.
 - `POST /api/idea` validation is local and must complete before inserting an
   idea or enqueuing a receipt ticket. Accepted ideas get `pooled` status,
   receipt number `E<edition>-I<seq>`, an `idea_received` event, and a `receipt`
@@ -68,7 +72,10 @@
   ordered ascending, with each event carrying its `id` and `type`.
 - A tick must keep the simulation moving without an LLM endpoint:
   - claim waiting ideas into teams,
+  - split project tasks across agents,
   - update project progress and bugs,
+  - write project commits,
+  - create or update a self-contained HTML artifact,
   - create conversations/gossip,
   - write agent memories and intents,
   - handle pitch reviews and awards when in those phases.
@@ -80,6 +87,9 @@
   - `memories(id, agent_id, text, importance, created_at)`
   - `conversations(id, edition_id, location, agent_ids_json, lines_json, created_at)`
   - `events(id, edition_id, type, payload_json, created_at)`
+  - `project_tasks(id, idea_id, team_id, title, owner_agent_id, status, output, created_at, updated_at)`
+  - `project_commits(id, idea_id, agent_id, message, diff_summary, artifact_id, created_at)`
+  - `artifacts(id, idea_id, version, type, title, summary, body, content_type, created_at, updated_at)`
   - `admin_settings(id, story_background, beat_interval_seconds, generation_paused)`
   - `print_queue(id, kind, payload_json, status)`
   - `mail_queue(id, idea_id, email, kind, in_world_reason, status, created_at)`
@@ -90,7 +100,7 @@
   parameters only as ignored compatibility arguments if needed.
 - Host controls currently do not require a token. If auth is introduced later,
   tests and README must change in the same commit.
-- Admin settings control the live demo: `generation_paused` blocks story ticks,
+- Admin settings control the live demo: `generation_paused` blocks project ticks,
   `beat_interval_seconds` controls background tick timing, and
   `story_background` is persisted for operator context.
 - Story reset is dangerous and must require exact `confirm: "RESET"`; reset
@@ -137,13 +147,15 @@
 - Good: `POST /api/idea` rejects invalid text before writing `ideas`,
   `print_queue`, or `events`.
 - Good: `tick()` with no LLM endpoint still produces claim, project update,
-  conversation, memory, and gossip evidence.
+  tasks, commits, artifact, conversation, memory, and gossip evidence.
 - Base: no external env configured, deterministic fallback still supports local
   demo flow.
 - Bad: external side effect happens before persistence validation or failure
   marks a queue row as completed.
 - Bad: adding old fields (`round`, `cycle`, `hopeHint`, `rules`, `stories`,
   `batchId`, `templateId`, `charId`) to v4 API responses.
+- Bad: treating generated dialogue as the only output; every claimed project
+  must have a visible artifact URL.
 - Bad: reintroducing token requirements for `/api/print/pending` or
   `/api/print/ack` without an explicit product decision and matching tests.
 
@@ -154,8 +166,11 @@
 - Schema tests for v4 tables and absence of active legacy `characters`.
 - Red/green tests for changed behavior:
   - idea submission, receipt number, and receipt print ticket,
+  - receipt print payload includes unique tracking id and QR URL,
   - local idea rejection with no mutation,
-  - next-tick idea claiming and first reaction/gossip,
+  - next-tick idea claiming, task split, commit log, artifact creation, and
+    first reaction/gossip,
+  - project/artifact API contract,
   - world event cursor and agent memory detail,
   - host skip to pitch/awards and certificate/leaderboard output,
   - admin pause/start, beat interval, background injection, and reset

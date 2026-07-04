@@ -1,4 +1,5 @@
 import json
+import html
 import re
 import threading
 import time
@@ -13,12 +14,12 @@ from .printer import CommandPrinterDriver
 
 PHASES = ["opening", "early_dev", "mid_crisis", "deadline", "pitch", "awards"]
 PHASE_DURATIONS = {
-    "opening": 5 * 60,
-    "early_dev": 15 * 60,
-    "mid_crisis": 8 * 60,
-    "deadline": 5 * 60,
-    "pitch": 8 * 60,
-    "awards": 4 * 60,
+    "opening": 2 * 60,
+    "early_dev": 4 * 60,
+    "mid_crisis": 3 * 60,
+    "deadline": 2 * 60,
+    "pitch": 3 * 60,
+    "awards": 1 * 60,
 }
 LOCATIONS = ["工位区A", "工位区B", "工位区C", "泡面咖啡角", "天台", "路演台", "评委席"]
 IDEA_REJECTION_MESSAGE = "组委会认为这个点子过于超前,换一个吧"
@@ -105,6 +106,8 @@ class GameService:
                 "idea": text,
                 "investorName": investor_name,
                 "editionNo": edition["no"],
+                "trackingId": receipt_no,
+                "qrUrl": self._tracking_url(idea_id, receipt_no),
             })
             self._event(edition["id"], "idea_received", {
                 "ideaId": idea_id,
@@ -132,14 +135,54 @@ class GameService:
                 ).fetchall()
             ]
             return {
+                "ideaId": row["id"],
+                "receiptNo": row["receipt_no"],
                 "status": row["status"],
                 "teamName": None if team is None else team["name"],
+                "projectId": row["id"] if row["team_id"] else None,
                 "currentForm": row["current_form"],
                 "progress": row["progress"],
                 "currentBug": row["current_bug"],
+                "artifact": self._artifact_summary_for_idea(row["id"]),
                 "gossip": [item for item in gossip if item],
                 "review": row["review"],
                 "rank": row["rank"],
+            }
+
+    def project(self, project_id):
+        with self.lock:
+            row = self._idea_row(project_id)
+            if not row["team_id"]:
+                raise ApiError("NOT_FOUND", "这个项目还没有被队伍认领。", status=404)
+            team = self._team_row(row["team_id"])
+            return {
+                "projectId": row["id"],
+                "ideaId": row["id"],
+                "receiptNo": row["receipt_no"],
+                "teamName": team["name"],
+                "ideaText": row["text"],
+                "currentForm": row["current_form"],
+                "progress": row["progress"],
+                "currentBug": row["current_bug"],
+                "tasks": self._tasks_for_idea(row["id"]),
+                "commits": self._commits_for_idea(row["id"]),
+                "artifact": self._artifact_summary_for_idea(row["id"]),
+            }
+
+    def artifact(self, artifact_id):
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM artifacts WHERE id = ?", (artifact_id,)).fetchone()
+            if row is None:
+                raise ApiError("NOT_FOUND", "找不到这个演示产物。", status=404)
+            return {
+                "artifactId": row["id"],
+                "ideaId": row["idea_id"],
+                "version": row["version"],
+                "type": row["type"],
+                "title": row["title"],
+                "summary": row["summary"],
+                "contentType": row["content_type"],
+                "body": row["body"],
             }
 
     def tick(self, now=None):
@@ -296,6 +339,9 @@ class GameService:
                 "memories",
                 "conversations",
                 "events",
+                "project_tasks",
+                "project_commits",
+                "artifacts",
                 "print_queue",
                 "mail_queue",
                 "inputs_log",
@@ -420,11 +466,15 @@ class GameService:
                 (team["id"], current_form, self._bug_for(idea["text"], 0), idea["id"]),
             )
             self.conn.execute("UPDATE teams SET idea_id = ? WHERE id = ?", (idea["id"], team["id"]))
+            self._ensure_project_work_items(idea, team, now)
+            artifact = self._upsert_artifact(idea, team, current_form, 0, self._bug_for(idea["text"], 0), now)
             self._event(edition["id"], "idea_claimed", {
                 "ideaId": idea["id"],
+                "projectId": idea["id"],
                 "teamName": team["name"],
                 "idea": idea["text"],
                 "currentForm": current_form,
+                "artifact": self._artifact_summary(artifact),
             }, now)
             self._insert_mail(idea, "claimed", f"你的点子被 {team['name']} 认领了: {current_form}", now)
 
@@ -441,10 +491,15 @@ class GameService:
                 "UPDATE ideas SET progress = ?, current_bug = ?, status = ? WHERE id = ?",
                 (progress, bug, status, idea["id"]),
             )
+            team = self._team_row(idea["team_id"])
+            self._advance_project_tasks(idea, team, progress, bug, now)
+            artifact = self._upsert_artifact(idea, team, idea["current_form"], progress, bug, now)
             self._event(edition["id"], "project_update", {
                 "ideaId": idea["id"],
+                "projectId": idea["id"],
                 "progress": progress,
                 "currentBug": bug,
+                "artifact": self._artifact_summary(artifact),
             }, now)
 
     def _conversation_tick(self, edition, now):
@@ -538,11 +593,15 @@ class GameService:
             )
             payload = {
                 "ideaId": idea["id"],
+                "projectId": idea["id"],
                 "receiptNo": idea["receipt_no"],
                 "idea": idea["text"],
                 "investorName": idea["investor_name"],
                 "teamName": self._team_row(idea["team_id"])["name"],
                 "currentForm": idea["current_form"],
+                "artifact": self._artifact_summary_for_idea(idea["id"]),
+                "trackingId": idea["receipt_no"],
+                "qrUrl": self._tracking_url(idea["id"], idea["receipt_no"]),
                 "review": review,
                 "rank": rank,
             }
@@ -711,12 +770,229 @@ class GameService:
     def _project_public(self, row):
         team = self._team_row(row["team_id"]) if row["team_id"] else None
         return {
+            "projectId": row["id"],
+            "ideaId": row["id"],
             "teamName": None if team is None else team["name"],
             "ideaText": row["text"],
             "currentForm": row["current_form"],
             "progress": row["progress"],
             "currentBug": row["current_bug"],
+            "artifact": self._artifact_summary_for_idea(row["id"]),
         }
+
+    def _ensure_project_work_items(self, idea, team, now):
+        if self.conn.execute("SELECT COUNT(*) FROM project_tasks WHERE idea_id = ?", (idea["id"],)).fetchone()[0]:
+            return
+        members = json.loads(team["member_ids_json"])
+        task_defs = [
+            ("产品定义", f"把“{idea['text']}”压成一个评委能看懂的 MVP"),
+            ("界面原型", "做出可点击的单页 demo,先保证能展示"),
+            ("数据与状态", "设计演示数据、状态切换和假结果"),
+            ("路演包装", "准备一句话卖点和偏题解释"),
+        ]
+        for index, (title, output) in enumerate(task_defs):
+            owner = members[index % len(members)]
+            self.conn.execute(
+                """
+                INSERT INTO project_tasks
+                (idea_id, team_id, title, owner_agent_id, status, output, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'todo', ?, ?, ?)
+                """,
+                (idea["id"], team["id"], title, owner, output, now, now),
+            )
+
+    def _advance_project_tasks(self, idea, team, progress, bug, now):
+        self._ensure_project_work_items(idea, team, now)
+        tasks = self.conn.execute(
+            "SELECT * FROM project_tasks WHERE idea_id = ? ORDER BY id",
+            (idea["id"],),
+        ).fetchall()
+        if not tasks:
+            return
+        done_slots = max(1, min(len(tasks), progress // 25 + 1))
+        for index, task in enumerate(tasks):
+            status = "done" if index < done_slots else "doing" if index == done_slots else "todo"
+            if task["status"] == status and status != "done":
+                continue
+            output = self._task_output(task["title"], idea["current_form"], progress, bug)
+            self.conn.execute(
+                "UPDATE project_tasks SET status = ?, output = ?, updated_at = ? WHERE id = ?",
+                (status, output, now, task["id"]),
+            )
+            if status == "done" and task["status"] != "done":
+                self._insert_project_commit(
+                    idea["id"],
+                    task["owner_agent_id"],
+                    f"完成{task['title']}",
+                    output,
+                    None,
+                    now,
+                )
+
+    def _insert_project_commit(self, idea_id, agent_id, message, diff_summary, artifact_id, now):
+        self.conn.execute(
+            """
+            INSERT INTO project_commits
+            (idea_id, agent_id, message, diff_summary, artifact_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (idea_id, agent_id, self._limit(message, 80), self._limit(diff_summary, 240), artifact_id, now),
+        )
+
+    def _upsert_artifact(self, idea, team, current_form, progress, bug, now):
+        previous = self.conn.execute(
+            "SELECT * FROM artifacts WHERE idea_id = ? ORDER BY version DESC LIMIT 1",
+            (idea["id"],),
+        ).fetchone()
+        version = 1 if previous is None else previous["version"] + 1
+        title = self._artifact_title(current_form)
+        summary = f"{team['name']} 做出的可演示原型: {current_form}"
+        body = self._artifact_html(idea, team, title, current_form, progress, bug)
+        if previous is None:
+            self.conn.execute(
+                """
+                INSERT INTO artifacts
+                (idea_id, version, type, title, summary, body, content_type, created_at, updated_at)
+                VALUES (?, ?, 'html', ?, ?, ?, 'text/html; charset=utf-8', ?, ?)
+                """,
+                (idea["id"], version, title, summary, body, now, now),
+            )
+            artifact_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        else:
+            artifact_id = previous["id"]
+            self.conn.execute(
+                """
+                UPDATE artifacts
+                SET version = ?, title = ?, summary = ?, body = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (version, title, summary, body, now, artifact_id),
+            )
+        self._insert_project_commit(
+            idea["id"],
+            json.loads(team["member_ids_json"])[0],
+            f"发布 demo v{version}",
+            f"更新 HTML 原型到 {progress}%: {bug}",
+            artifact_id,
+            now,
+        )
+        return self.conn.execute("SELECT * FROM artifacts WHERE id = ?", (artifact_id,)).fetchone()
+
+    def _artifact_summary_for_idea(self, idea_id):
+        row = self.conn.execute(
+            "SELECT * FROM artifacts WHERE idea_id = ? ORDER BY version DESC LIMIT 1",
+            (idea_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._artifact_summary(row)
+
+    def _artifact_summary(self, row):
+        return {
+            "artifactId": row["id"],
+            "type": row["type"],
+            "title": row["title"],
+            "summary": row["summary"],
+            "version": row["version"],
+            "url": f"/api/artifact/{row['id']}",
+        }
+
+    def _tasks_for_idea(self, idea_id):
+        return [
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "ownerAgentId": row["owner_agent_id"],
+                "status": row["status"],
+                "output": row["output"],
+            }
+            for row in self.conn.execute(
+                "SELECT * FROM project_tasks WHERE idea_id = ? ORDER BY id",
+                (idea_id,),
+            ).fetchall()
+        ]
+
+    def _commits_for_idea(self, idea_id):
+        return [
+            {
+                "id": row["id"],
+                "agentId": row["agent_id"],
+                "message": row["message"],
+                "diffSummary": row["diff_summary"],
+                "artifactId": row["artifact_id"],
+                "createdAt": row["created_at"],
+            }
+            for row in self.conn.execute(
+                "SELECT * FROM project_commits WHERE idea_id = ? ORDER BY id",
+                (idea_id,),
+            ).fetchall()
+        ]
+
+    def _task_output(self, title, current_form, progress, bug):
+        if title == "产品定义":
+            return f"MVP 不是完整实现“{current_form}”,而是展示用户输入后得到一个可解释结果。"
+        if title == "界面原型":
+            return f"单页 demo 已有标题、输入框、按钮和结果区,完成度 {progress}%。"
+        if title == "数据与状态":
+            return f"用假数据驱动演示状态; 当前已知问题: {bug}"
+        return f"路演说法: 这个 demo 先证明方向,偏题部分包装成黑客松特色。"
+
+    def _artifact_title(self, current_form):
+        cleaned = re.sub(r"[^\w\u4e00-\u9fff]+", "", current_form)[:12] or "AI黑客松Demo"
+        return f"{cleaned} Demo"
+
+    def _artifact_html(self, idea, team, title, current_form, progress, bug):
+        safe_title = html.escape(title)
+        safe_idea = html.escape(idea["text"])
+        safe_form = html.escape(current_form)
+        safe_team = html.escape(team["name"])
+        safe_bug = html.escape(bug or "演示数据偶尔会跑偏")
+        safe_receipt = html.escape(idea["receipt_no"])
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{safe_title}</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #f6f8fb; color: #172033; }}
+    main {{ max-width: 760px; margin: 0 auto; padding: 32px 20px; }}
+    .panel {{ background: white; border: 1px solid #d9e0ea; border-radius: 8px; padding: 20px; box-shadow: 0 8px 24px rgba(20, 35, 60, .08); }}
+    .meta {{ color: #5d6b82; font-size: 14px; }}
+    .progress {{ height: 12px; background: #dfe6ef; border-radius: 999px; overflow: hidden; }}
+    .bar {{ width: {int(progress)}%; height: 100%; background: #18a058; }}
+    button {{ border: 0; border-radius: 6px; background: #165dff; color: white; padding: 10px 14px; font-weight: 700; cursor: pointer; }}
+    input {{ width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #c9d3df; border-radius: 6px; margin: 10px 0; }}
+    #result {{ margin-top: 14px; padding: 12px; border-radius: 6px; background: #eef6ff; min-height: 44px; }}
+  </style>
+</head>
+<body>
+  <main data-project-id="{idea['id']}" data-receipt-no="{safe_receipt}">
+    <section class="panel">
+      <p class="meta">{safe_team} / {safe_receipt}</p>
+      <h1>{safe_title}</h1>
+      <p>原始 idea: {safe_idea}</p>
+      <p>当前做出来的版本: {safe_form}</p>
+      <div class="progress" aria-label="完成度"><div class="bar"></div></div>
+      <p class="meta">完成度 {int(progress)}% · 当前 bug: {safe_bug}</p>
+      <label>输入一个现场测试用例</label>
+      <input id="demo-input" value="{safe_idea}">
+      <button onclick="runDemo()">运行 demo</button>
+      <div id="result">等待演示。</div>
+    </section>
+  </main>
+  <script>
+    function runDemo() {{
+      const value = document.getElementById('demo-input').value || '{safe_idea}';
+      document.getElementById('result').textContent =
+        'AI 团队把“' + value + '”加工成了一个可路演原型: {safe_form}。';
+    }}
+  </script>
+</body>
+</html>"""
+
+    def _tracking_url(self, idea_id, receipt_no):
+        return f"/idea/{idea_id}?receipt={receipt_no}"
 
     def _idea_row(self, idea_id):
         row = self.conn.execute("SELECT * FROM ideas WHERE id = ?", (idea_id,)).fetchone()
@@ -896,6 +1172,12 @@ class AsyncGameService:
 
     def idea(self, idea_id):
         return self.game.idea(idea_id)
+
+    def project(self, project_id):
+        return self.game.project(project_id)
+
+    def artifact(self, artifact_id):
+        return self.game.artifact(artifact_id)
 
     def tick(self, now=None):
         return self.game.tick(now=now)

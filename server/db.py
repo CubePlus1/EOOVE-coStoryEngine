@@ -73,6 +73,41 @@ CREATE TABLE IF NOT EXISTS events (
   created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS project_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  idea_id INTEGER NOT NULL,
+  team_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  owner_agent_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  output TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_commits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  idea_id INTEGER NOT NULL,
+  agent_id TEXT NOT NULL,
+  message TEXT NOT NULL,
+  diff_summary TEXT NOT NULL,
+  artifact_id INTEGER,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  idea_id INTEGER NOT NULL,
+  version INTEGER NOT NULL,
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  body TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS admin_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   story_background TEXT NOT NULL DEFAULT '',

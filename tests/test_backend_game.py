@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from server.app import create_handler
-from server.game import ApiError, AsyncGameService, GameService
+from server.game import ApiError, AsyncGameService, GameService, PHASE_DURATIONS
 from server.llm import HttpJsonLlmGateway
 from server.printer import CommandPrinterDriver
 
@@ -203,6 +203,18 @@ class GameServiceTest(unittest.TestCase):
         self.assertGreaterEqual(self.query_value("SELECT COUNT(*) FROM agents WHERE role = 'hacker'"), 9)
         self.assertGreaterEqual(self.query_value("SELECT COUNT(*) FROM agents WHERE role = 'judge'"), 2)
 
+    def test_edition_budget_is_fifteen_minutes(self):
+        self.assertEqual(sum(PHASE_DURATIONS.values()), 15 * 60)
+
+        for table in ["editions", "teams", "events"]:
+            self.game.conn.execute(f"DELETE FROM {table}")
+        self.game.conn.commit()
+        self.game.ensure_world(now=1000)
+        edition = self.query_one("SELECT phase, phase_ends_at FROM editions ORDER BY id DESC LIMIT 1")
+
+        self.assertEqual(edition["phase"], "opening")
+        self.assertEqual(edition["phase_ends_at"], 1000 + PHASE_DURATIONS["opening"])
+
     def test_submit_idea_returns_receipt_and_prints_receipt_ticket(self):
         result = self.game.submit_idea({
             "text": "给猫做相亲App",
@@ -216,6 +228,8 @@ class GameServiceTest(unittest.TestCase):
         self.assertEqual(dict(idea), {"text": "给猫做相亲App", "investor_name": "七色", "status": "pooled"})
         payload = json.loads(self.query_value("SELECT payload_json FROM print_queue WHERE kind = 'receipt'"))
         self.assertEqual(payload["idea"], "给猫做相亲App")
+        self.assertIn(f"/idea/{result['ideaId']}?receipt={result['receiptNo']}", payload["qrUrl"])
+        self.assertEqual(payload["trackingId"], result["receiptNo"])
 
     def test_idea_validation_rejects_sensitive_or_long_text_without_mutation(self):
         with self.assertRaises(ApiError) as raised:
@@ -246,6 +260,26 @@ class GameServiceTest(unittest.TestCase):
         self.assertGreaterEqual(self.query_value("SELECT COUNT(*) FROM memories"), 2)
         self.assertEqual(self.llm.contexts[-1]["task"], "conversation")
         self.assertIn("memories", self.llm.contexts[-1]["agents"][0])
+
+    def test_tick_builds_project_artifact_tasks_and_commits(self):
+        idea = self.game.submit_idea({"text": "给猫做相亲App", "investorName": "七色"})
+
+        self.game.tick(now=100)
+        tracked = self.game.idea(idea["ideaId"])
+        project = self.game.project(tracked["projectId"])
+        artifact = self.game.artifact(project["artifact"]["artifactId"])
+
+        self.assertEqual(tracked["artifact"]["type"], "html")
+        self.assertIn("/api/artifact/", tracked["artifact"]["url"])
+        self.assertEqual(project["ideaId"], idea["ideaId"])
+        self.assertEqual(project["receiptNo"], idea["receiptNo"])
+        self.assertGreaterEqual(len(project["tasks"]), 3)
+        self.assertTrue(all(task["ownerAgentId"] for task in project["tasks"]))
+        self.assertGreaterEqual(len(project["commits"]), 1)
+        self.assertIn("html", artifact["contentType"])
+        self.assertIn("给猫做相亲App", artifact["body"])
+        self.assertIn("<button", artifact["body"])
+        self.assertIn("data-project-id", artifact["body"])
 
     def test_unclaimed_idea_gets_first_reaction_within_next_tick(self):
         idea = self.game.submit_idea({"text": "给评委写借口生成器"})
@@ -333,6 +367,9 @@ class GameServiceTest(unittest.TestCase):
         self.assertEqual(self.query_value("SELECT COUNT(*) FROM ideas"), 0)
         self.assertEqual(self.query_value("SELECT no FROM editions WHERE id = 1"), 1)
         self.assertGreaterEqual(self.game.ensure_world()["agents"], 11)
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM project_tasks"), 0)
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM project_commits"), 0)
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM artifacts"), 0)
 
 
 class HttpContractTest(unittest.TestCase):
@@ -378,10 +415,21 @@ class HttpContractTest(unittest.TestCase):
         status, world = self.request("GET", "/api/world?after=0")
         self.assertEqual(status, 200)
         self.assertEqual(set(world), {"edition", "agents", "conversations", "projects", "events"})
+        self.assertIn("artifact", world["projects"][0])
 
         status, agent = self.request("GET", f"/api/agent/{world['agents'][0]['id']}")
         self.assertEqual(status, 200)
         self.assertIn("memories", agent)
+
+        status, project = self.request("GET", f"/api/project/{world['projects'][0]['projectId']}")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(project["tasks"]), 3)
+        self.assertTrue(project["artifact"]["url"].startswith("/api/artifact/"))
+
+        status, artifact = self.request("GET", project["artifact"]["url"])
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", artifact["contentType"])
+        self.assertIn("给猫做相亲App", artifact["body"])
 
         status, host = self.request("POST", "/api/host", {"action": "skip_phase", "phase": "pitch"})
         self.assertEqual(status, 200)

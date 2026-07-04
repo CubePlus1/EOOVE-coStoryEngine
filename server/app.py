@@ -42,6 +42,14 @@ def create_handler(game, static_root=None):
                     idea_id = parsed.path.rsplit("/", 1)[-1]
                     self._send_json(200, self.service.idea(idea_id))
                     return
+                if parsed.path.startswith("/api/project/"):
+                    project_id = parsed.path.rsplit("/", 1)[-1]
+                    self._send_json(200, self.service.project(project_id))
+                    return
+                if parsed.path.startswith("/api/artifact/"):
+                    artifact_id = parsed.path.rsplit("/", 1)[-1]
+                    self._send_json(200, self.service.artifact(artifact_id))
+                    return
                 if parsed.path.startswith("/api/agent/"):
                     agent_id = parsed.path.rsplit("/", 1)[-1]
                     self._send_json(200, self.service.agent(agent_id))
