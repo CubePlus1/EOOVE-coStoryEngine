@@ -1,6 +1,7 @@
 import json
-import os
 import subprocess
+
+from .config import get_env, get_float_env
 
 
 class NullPrinterDriver:
@@ -12,8 +13,8 @@ class NullPrinterDriver:
 
 class CommandPrinterDriver(NullPrinterDriver):
     def __init__(self, command=None, timeout=None):
-        self.command = command or os.environ.get("EOOVE_PRINTER_COMMAND")
-        self.timeout = float(timeout or os.environ.get("EOOVE_PRINTER_TIMEOUT", "10"))
+        self.command = command or get_env("EOOVE_PRINTER_COMMAND")
+        self.timeout = timeout or get_float_env("EOOVE_PRINTER_TIMEOUT", 10)
         self.configured = bool(self.command)
 
     def print_ticket(self, ticket):

@@ -33,6 +33,7 @@
   - `process_next_mail_job() -> dict | None`
 - External adapters:
   - LLM gateway methods still exist, but v2 join moderation is local sensitive-word/length validation. Weaver output must not include v1 `directive`, `hopeDelta`, `crossLocation`, or `oracleApplied`.
+  - LLM requests include `model` and default to `gpt-5.4-mini`; do not send `thinking` or `reasoning` fields.
   - Mail transport: `send(message)`.
   - Printer driver: `print_ticket(ticket)`.
 
@@ -55,7 +56,8 @@
   - Mail transport failure leaves `mail_queue.status = 'pending'` for retry.
   - Simulated mail rows are retained as `simulated` and must not block later pending mail.
 - Environment keys:
-  - `EOOVE_LLM_ENDPOINT`, `EOOVE_LLM_API_KEY`
+  - `EOOVE_HOST`, `EOOVE_PORT`, `EOOVE_DB_PATH`
+  - `EOOVE_LLM_ENDPOINT`, `EOOVE_LLM_API_KEY`, `EOOVE_LLM_MODEL`
   - `MAIL_WHITELIST`
   - `EOOVE_SMTP_HOST`, `EOOVE_SMTP_PORT`, `EOOVE_SMTP_USERNAME`, `EOOVE_SMTP_PASSWORD`, `EOOVE_MAIL_FROM`, `EOOVE_SMTP_TLS`
   - `EOOVE_PRINTER_COMMAND`, `EOOVE_PRINTER_TIMEOUT`

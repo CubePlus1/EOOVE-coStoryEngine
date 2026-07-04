@@ -2,6 +2,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from .config import get_env, get_int_env
 from .game import ApiError, AsyncGameService, GameService
 from .rate_limit import RateLimiter
 from .runtime import BackgroundRuntime, WeaveWorkerRuntime
@@ -106,7 +107,10 @@ def create_handler(game):
     return GameRequestHandler
 
 
-def run(host="127.0.0.1", port=8000, db_path="server/db.sqlite"):
+def run(host=None, port=None, db_path=None):
+    host = host or get_env("EOOVE_HOST", "127.0.0.1")
+    port = port or get_int_env("EOOVE_PORT", 8000)
+    db_path = db_path or get_env("EOOVE_DB_PATH", "server/db.sqlite")
     game = GameService(db_path)
     background_runtime = BackgroundRuntime(game)
     weave_runtime = WeaveWorkerRuntime(game)

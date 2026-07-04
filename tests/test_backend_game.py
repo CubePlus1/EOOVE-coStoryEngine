@@ -109,9 +109,53 @@ class LlmGatewayTest(unittest.TestCase):
 
             self.assertEqual(result["name"], "风暴记录员")
             self.assertEqual(received[0]["task"], "character")
+            self.assertEqual(received[0]["model"], "gpt-5.4-mini")
             self.assertEqual(received[0]["payload"], {"selfDesc": "追雷的人"})
             self.assertIn("角色", received[0]["prompt"])
+            self.assertNotIn("thinking", received[0])
+            self.assertNotIn("reasoning", received[0])
         finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+
+    def test_http_gateway_model_can_be_overridden_without_enabling_thinking(self):
+        received = []
+        old_model = os.environ.get("EOOVE_LLM_MODEL")
+        os.environ["EOOVE_LLM_MODEL"] = "custom-fast-model"
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                received.append(json.loads(self.rfile.read(length).decode("utf-8")))
+                body = json.dumps({"result": {"ok": True}}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            host, port = server.server_address
+            gateway = HttpJsonLlmGateway(endpoint=f"http://{host}:{port}")
+
+            result = gateway.weave({"world": {"legend": "钟停了"}})
+
+            self.assertEqual(result, {"ok": True})
+            self.assertEqual(received[0]["model"], "custom-fast-model")
+            self.assertNotIn("thinking", received[0])
+            self.assertNotIn("reasoning", received[0])
+        finally:
+            if old_model is None:
+                os.environ.pop("EOOVE_LLM_MODEL", None)
+            else:
+                os.environ["EOOVE_LLM_MODEL"] = old_model
             server.shutdown()
             thread.join(timeout=2)
             server.server_close()

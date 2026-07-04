@@ -1,7 +1,11 @@
 import json
-import os
 from pathlib import Path
 from urllib import error, request
+
+from .config import get_env
+
+
+DEFAULT_LLM_MODEL = "gpt-5.4-mini"
 
 
 class LlmGateway:
@@ -24,9 +28,10 @@ class LlmGateway:
 
 
 class HttpJsonLlmGateway(LlmGateway):
-    def __init__(self, endpoint=None, api_key=None, prompts_dir=None, timeout_overrides=None):
-        self.endpoint = endpoint or os.environ.get("EOOVE_LLM_ENDPOINT")
-        self.api_key = api_key or os.environ.get("EOOVE_LLM_API_KEY")
+    def __init__(self, endpoint=None, api_key=None, prompts_dir=None, timeout_overrides=None, model=None):
+        self.endpoint = endpoint or get_env("EOOVE_LLM_ENDPOINT")
+        self.api_key = api_key or get_env("EOOVE_LLM_API_KEY")
+        self.model = model or get_env("EOOVE_LLM_MODEL", DEFAULT_LLM_MODEL)
         self.prompts_dir = Path(prompts_dir or Path(__file__).with_name("prompts"))
         self.timeout_overrides = timeout_overrides or {}
         self.configured = bool(self.endpoint)
@@ -76,6 +81,7 @@ class HttpJsonLlmGateway(LlmGateway):
             return None
         body = json.dumps(
             {
+                "model": self.model,
                 "task": task,
                 "prompt": self._prompt(prompt_name),
                 "payload": payload,

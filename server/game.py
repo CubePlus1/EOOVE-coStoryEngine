@@ -1,5 +1,4 @@
 import json
-import os
 import re
 import threading
 import time
@@ -7,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from .db import connect, initialize
+from .config import get_env
 from .llm import HttpJsonLlmGateway
 from .mail import SmtpMailTransport
 from .printer import CommandPrinterDriver
@@ -943,7 +943,7 @@ class GameService:
     def _mail_allowed(self, email):
         whitelist = {
             item.strip().lower()
-            for item in os.environ.get("MAIL_WHITELIST", "").split(",")
+            for item in get_env("MAIL_WHITELIST", "").split(",")
             if item.strip()
         }
         return bool(whitelist) and email.lower() in whitelist

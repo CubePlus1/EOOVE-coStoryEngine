@@ -1,6 +1,7 @@
-import os
 import smtplib
 from email.message import EmailMessage
+
+from .config import get_bool_env, get_env, get_int_env
 
 
 class NullMailTransport:
@@ -20,13 +21,12 @@ class SmtpMailTransport(NullMailTransport):
         sender=None,
         use_tls=None,
     ):
-        self.host = host or os.environ.get("EOOVE_SMTP_HOST")
-        self.port = int(port or os.environ.get("EOOVE_SMTP_PORT", "587"))
-        self.username = username if username is not None else os.environ.get("EOOVE_SMTP_USERNAME")
-        self.password = password if password is not None else os.environ.get("EOOVE_SMTP_PASSWORD")
-        self.sender = sender or os.environ.get("EOOVE_MAIL_FROM", "eoove@example.local")
-        tls_value = os.environ.get("EOOVE_SMTP_TLS", "1") if use_tls is None else str(int(bool(use_tls)))
-        self.use_tls = tls_value not in {"0", "false", "False", "no", "NO"}
+        self.host = host or get_env("EOOVE_SMTP_HOST")
+        self.port = port or get_int_env("EOOVE_SMTP_PORT", 587)
+        self.username = username if username is not None else get_env("EOOVE_SMTP_USERNAME")
+        self.password = password if password is not None else get_env("EOOVE_SMTP_PASSWORD")
+        self.sender = sender or get_env("EOOVE_MAIL_FROM", "eoove@example.local")
+        self.use_tls = get_bool_env("EOOVE_SMTP_TLS", True) if use_tls is None else bool(use_tls)
         self.configured = bool(self.host)
 
     def send(self, message):
