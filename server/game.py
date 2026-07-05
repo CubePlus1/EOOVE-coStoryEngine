@@ -618,7 +618,7 @@ class GameService:
                 "UPDATE agents SET intent = ?, location = ?, talking = 0 WHERE id = ?",
                 (result["intents"].get(agent["id"]) or "想继续打探别队进度", "泡面咖啡角", agent["id"]),
             )
-        gossip_text = f"泡面角有人提到了你的idea: {idea_text}"
+        gossip_text = f"展区有人提到了你的idea: {idea_text}"
         self._event(edition["id"], "conversation", {
             "conversationId": conversation_id,
             "location": "泡面咖啡角",
@@ -912,6 +912,7 @@ class GameService:
         body = self._artifact_body(idea, team, title, current_form, progress, bug, plan)
         if body is None:
             return previous
+        fallback_body = 'data-artifact-status="llm-unavailable"' in body
         if previous is None:
             self.conn.execute(
                 """
@@ -935,8 +936,8 @@ class GameService:
         self._insert_project_commit(
             idea["id"],
             json.loads(team["member_ids_json"])[0],
-            f"发布 demo v{version}",
-            f"更新 {plan['label']} HTML 原型到 {progress}%: {bug}",
+            f"挂载容错界面 v{version}" if fallback_body else f"发布 demo v{version}",
+            f"LLM 生成接口暂不可用,展示容错界面: {bug}" if fallback_body else f"更新 {plan['label']} HTML 原型到 {progress}%: {bug}",
             artifact_id,
             now,
         )
@@ -948,7 +949,7 @@ class GameService:
         ))
         if generated is not None:
             return generated
-        return None
+        return self._fallback_artifact_html(idea, team, title, current_form, progress, bug)
 
     def _artifact_context(self, idea, team, title, current_form, progress, bug, plan):
         fingerprint = hashlib.sha1(f"{idea['id']}:{idea['text']}:{current_form}".encode("utf-8")).hexdigest()[:8]
@@ -1078,6 +1079,56 @@ class GameService:
 
     def _artifact_plan(self, idea_text, current_form):
         return {"kind": "generated-frontend", "label": "AI Generated Frontend"}
+
+    def _fallback_artifact_html(self, idea, team, title, current_form, progress, bug):
+        safe_title = html.escape(title)
+        safe_idea = html.escape(idea["text"])
+        safe_form = html.escape(current_form)
+        safe_team = html.escape(team["name"])
+        safe_receipt = html.escape(idea["receipt_no"])
+        safe_bug = html.escape(bug or "LLM 生成接口暂不可用")
+        progress_value = max(0, min(int(progress), 100))
+        tokens = "; ".join(f"{name}: {value}" for name, value in ARTIFACT_STYLE_TOKENS.items())
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="6">
+  <title>{safe_title} - 生成容错</title>
+  <style>
+    :root {{ color-scheme: light; {tokens}; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; background: var(--bg-obsidian); color: var(--text-primary); font-family: var(--font-family); display: grid; place-items: center; padding: 24px; }}
+    main {{ width: min(880px, 100%); border: 1px solid var(--glass-border); border-radius: 16px; background: var(--bg-card); box-shadow: var(--glass-shadow); padding: clamp(22px, 5vw, 48px); }}
+    .status {{ display: inline-flex; align-items: center; gap: 10px; border: 1px solid var(--glass-border-focus); border-radius: 999px; padding: 8px 12px; color: var(--text-secondary); font-size: 14px; font-weight: 800; }}
+    .dot {{ width: 10px; height: 10px; border-radius: 50%; background: var(--accent-orange); box-shadow: 0 0 18px var(--accent-orange-glow); }}
+    h1 {{ margin: 18px 0 12px; font-size: clamp(34px, 7vw, 72px); line-height: .95; letter-spacing: 0; }}
+    p {{ color: var(--text-secondary); line-height: 1.65; }}
+    .grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 24px; }}
+    .tile {{ min-height: 120px; border: 1px solid var(--glass-border); border-radius: 12px; background: var(--bg-card-hover); padding: 16px; }}
+    .tile span {{ display: block; color: var(--text-muted); font-size: 13px; font-weight: 800; }}
+    .tile strong {{ display: block; margin-top: 8px; font-size: clamp(22px, 4vw, 36px); line-height: 1; }}
+    .progress {{ height: 12px; border-radius: 99px; overflow: hidden; background: oklch(0.24 0.03 75 / .08); margin-top: 24px; }}
+    .bar {{ width: {progress_value}%; height: 100%; background: linear-gradient(90deg, var(--accent-cyan), var(--accent-orange), var(--accent-crimson)); }}
+    @media (max-width: 720px) {{ .grid {{ grid-template-columns: 1fr; }} main {{ border-radius: 12px; }} }}
+  </style>
+</head>
+<body>
+  <main data-artifact-status="llm-unavailable" data-idea-id="{idea['id']}" data-receipt-no="{safe_receipt}">
+    <div class="status"><i class="dot"></i><span>AI 生成接口暂不可用，正在自动重试</span></div>
+    <h1>{safe_idea}</h1>
+    <p>这个地址已经挂载成功，但当前展示的是容错界面，不是最终 demo。多 agent 仍在推进任务和提交记录；当模型 API 恢复并返回合格 HTML 后，本页会自动替换为基于 idea 真实生成的前端。</p>
+    <div class="grid">
+      <div class="tile"><span>当前形态</span><strong>{safe_form}</strong></div>
+      <div class="tile"><span>队伍</span><strong>{safe_team}</strong></div>
+      <div class="tile"><span>状态</span><strong>{progress_value}%</strong></div>
+    </div>
+    <p>{safe_bug}</p>
+    <div class="progress" aria-label="项目进度"><div class="bar"></div></div>
+  </main>
+</body>
+</html>"""
 
     def _idea_progress_html(self, idea, artifact):
         team = self._team_row(idea["team_id"]) if idea["team_id"] else None
@@ -1227,10 +1278,10 @@ class GameService:
 
     def _bug_for(self, text, progress):
         if progress >= 80:
-            return f"{text} 的演示按钮只在评委没看时可用"
+            return f"{text} 的演示按钮状态提示还不够清楚"
         if progress >= 40:
-            return f"{text} 的登录页把用户送去泡面角"
-        return f"{text} 的原型会把猫的照片识别成需求文档"
+            return f"{text} 的输入结果还需要更明确的下一步"
+        return f"{text} 的首屏信息层级还需要整理"
 
     def _new_receipt_no(self, edition_no):
         next_id = self.conn.execute("SELECT COUNT(*) FROM ideas").fetchone()[0] + 1

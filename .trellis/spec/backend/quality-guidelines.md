@@ -82,8 +82,8 @@
   - update project progress and bugs,
   - write project commits,
   - request a self-contained HTML artifact through the LLM `artifact` task;
-    only publish valid generated HTML and otherwise keep the visual artifact
-    route on its waiting page,
+    publish valid generated HTML when available, otherwise mount a clearly
+    marked fallback interface instead of a fake demo,
   - create conversations/gossip,
   - write agent memories and intents,
   - handle pitch reviews and awards when in those phases.
@@ -159,17 +159,17 @@
 - Good: `POST /api/idea` rejects invalid text before writing `ideas`,
   `print_queue`, or `events`.
 - Good: `tick()` with no LLM endpoint still produces claim, project update,
-  tasks, commits, conversation, memory, gossip evidence, and a waiting visual
-  route without publishing a fake artifact.
+  tasks, commits, conversation, memory, gossip evidence, and a fallback visual
+  route without publishing a fake demo.
 - Base: no external env configured, the local demo flow shows project progress
-  while waiting for real generated HTML.
+  plus a fallback artifact surface while waiting for real generated HTML.
 - Bad: external side effect happens before persistence validation or failure
   marks a queue row as completed.
 - Bad: adding old fields (`round`, `cycle`, `hopeHint`, `rules`, `stories`,
   `batchId`, `templateId`, `charId`) to v4 API responses.
 - Bad: treating generated dialogue as the only output; every claimed project
-  must expose a visible artifact route, even when it is still waiting for valid
-  generated HTML.
+  must expose a visible artifact route, even when the route is currently the
+  LLM-unavailable fallback.
 - Bad: reintroducing token requirements for `/api/print/pending` or
   `/api/print/ack` without an explicit product decision and matching tests.
 

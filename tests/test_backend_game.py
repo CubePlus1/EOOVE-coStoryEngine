@@ -263,9 +263,10 @@ class GameServiceTest(unittest.TestCase):
         self.assertNotIn("data-project-id", updated_progress_page["body"])
         self.assertIn("text/html", visual_page["contentType"])
         self.assertIn("给猫做相亲App", visual_page["body"])
-        self.assertIn("AI 前端生成中", visual_page["body"])
+        self.assertIn("AI 生成接口暂不可用", visual_page["body"])
+        self.assertIn('data-artifact-status="llm-unavailable"', visual_page["body"])
         self.assertNotIn("data-project-id", visual_page["body"])
-        self.assertIsNone(self.game.idea(idea["ideaId"])["artifact"])
+        self.assertIsNotNone(self.game.idea(idea["ideaId"])["artifact"])
 
     def test_finished_project_does_not_keep_releasing_artifacts(self):
         self.llm.results = [{"html": self.generated_html(1, index)} for index in range(20)]
@@ -341,27 +342,33 @@ class GameServiceTest(unittest.TestCase):
         self.assertNotIn("demo-stage", artifact["body"])
         self.assertNotIn("运行 demo", artifact["body"])
         self.assertNotIn("完成度", artifact["body"])
+        self.assertNotIn("猫的照片识别成需求文档", artifact["body"])
 
     def test_each_idea_mounts_only_its_generated_html(self):
         self.llm.results = [
             {"html": self.generated_html(1, "cat-claim")},
             {"html": self.generated_html(2, "brief-claim")},
+            {"html": self.generated_html(3, "dog-claim")},
             {"html": self.generated_html(1, "cat-advance")},
             {"html": self.generated_html(2, "brief-advance")},
+            {"html": self.generated_html(3, "dog-advance")},
         ]
         first = self.game.submit_idea({"text": "给猫做相亲App"})
         second = self.game.submit_idea({"text": "给会议做总结器"})
+        third = self.game.submit_idea({"text": "给狗做相亲App"})
 
         self.game.tick(now=100)
 
         first_body = self.game.visual_artifact_page(first["ideaId"])["body"]
         second_body = self.game.visual_artifact_page(second["ideaId"])["body"]
+        third_body = self.game.visual_artifact_page(third["ideaId"])["body"]
 
         self.assertIn("真实生成前端 cat-advance", first_body)
         self.assertIn("真实生成前端 brief-advance", second_body)
         self.assertNotIn("demo-stage", first_body)
         self.assertNotIn("idea-chip", second_body)
         self.assertNotEqual(first_body, second_body)
+        self.assertNotEqual(first_body, third_body)
 
     def test_artifact_generation_asks_llm_for_frontend_html(self):
         self.llm.results = [
@@ -395,7 +402,7 @@ class GameServiceTest(unittest.TestCase):
         self.assertTrue(any("data-idea-fingerprint" in item for item in artifact_contexts[0]["requirements"]))
         self.assertIn("LLM artifact v2", artifact["body"])
 
-    def test_invalid_or_missing_llm_html_does_not_publish_fake_artifact(self):
+    def test_invalid_or_missing_llm_html_mounts_fallback_not_fake_demo(self):
         self.llm.results = [
             None,
             {
@@ -411,9 +418,10 @@ class GameServiceTest(unittest.TestCase):
         tracked = self.game.idea(idea["ideaId"])
         visual_page = self.game.visual_artifact_page(idea["ideaId"])["body"]
 
-        self.assertIsNone(tracked["artifact"])
-        self.assertEqual(self.query_value("SELECT COUNT(*) FROM artifacts"), 0)
-        self.assertIn("AI 前端生成中", visual_page)
+        self.assertIsNotNone(tracked["artifact"])
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM artifacts"), 1)
+        self.assertIn("AI 生成接口暂不可用", visual_page)
+        self.assertIn('data-artifact-status="llm-unavailable"', visual_page)
         self.assertNotIn("data-project-id", visual_page)
         self.assertNotIn("运行 demo", visual_page)
 
@@ -590,7 +598,8 @@ class HttpContractTest(unittest.TestCase):
         status, project = self.request("GET", f"/api/project/{world['projects'][0]['projectId']}")
         self.assertEqual(status, 200)
         self.assertGreaterEqual(len(project["tasks"]), 3)
-        self.assertIsNone(project["artifact"])
+        self.assertEqual(project["artifact"]["url"], f"/artifacts/idea-{idea['ideaId']}.html")
+        self.assertTrue(project["artifact"]["apiUrl"].startswith("/api/artifact/"))
 
         status, content_type, body = self.request_raw("GET", f"/idea/{idea['ideaId']}")
         self.assertEqual(status, 200)
@@ -602,7 +611,8 @@ class HttpContractTest(unittest.TestCase):
         status, content_type, body = self.request_raw("GET", f"/artifacts/idea-{idea['ideaId']}.html")
         self.assertEqual(status, 200)
         self.assertIn("text/html", content_type)
-        self.assertIn("AI 前端生成中", body)
+        self.assertIn("AI 生成接口暂不可用", body)
+        self.assertIn('data-artifact-status="llm-unavailable"', body)
         self.assertNotIn("data-project-id", body)
 
         status, host = self.request("POST", "/api/host", {"action": "skip_phase", "phase": "pitch"})
