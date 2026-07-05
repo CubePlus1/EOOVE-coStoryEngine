@@ -25,6 +25,33 @@ PHASE_DURATIONS = {
 LOCATIONS = ["工位区A", "工位区B", "工位区C", "泡面咖啡角", "天台", "路演台", "评委席"]
 IDEA_REJECTION_MESSAGE = "组委会认为这个点子过于超前,换一个吧"
 SENSITIVE_WORDS = ("毁灭", "杀", "血腥", "色情", "政治", "广告", "全世界")
+ARTIFACT_STYLE_TOKENS = {
+    "--bg-obsidian": "oklch(0.98 0.008 75)",
+    "--bg-card": "oklch(1.0 0.005 75 / 0.8)",
+    "--bg-card-hover": "oklch(1.0 0.005 75 / 0.95)",
+    "--accent-cyan": "oklch(0.76 0.11 85)",
+    "--accent-cyan-glow": "oklch(0.76 0.11 85 / 0.35)",
+    "--accent-crimson": "oklch(0.68 0.18 355)",
+    "--accent-crimson-glow": "oklch(0.68 0.18 355 / 0.35)",
+    "--accent-orange": "oklch(0.78 0.13 60)",
+    "--accent-orange-glow": "oklch(0.78 0.13 60 / 0.35)",
+    "--text-primary": "oklch(0.24 0.03 75)",
+    "--text-secondary": "oklch(0.40 0.02 75)",
+    "--text-muted": "oklch(0.60 0.015 75)",
+    "--glass-border": "oklch(0.24 0.03 75 / 0.08)",
+    "--glass-border-focus": "oklch(0.68 0.18 355 / 0.25)",
+    "--glass-shadow": "0 8px 32px 0 oklch(0.24 0.03 75 / 0.08)",
+    "--font-family": "'Outfit', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif",
+}
+BLOCKED_ARTIFACT_TERMS = (
+    "运行 demo",
+    "原始 idea",
+    "项目进度",
+    "ai hackathon demo",
+    "猫的照片识别成需求文档",
+    "demo-stage",
+    "idea-chip",
+)
 
 
 class ApiError(Exception):
@@ -506,7 +533,7 @@ class GameService:
                 "teamName": team["name"],
                 "idea": idea["text"],
                 "currentForm": current_form,
-                "artifact": self._artifact_summary(artifact),
+                "artifact": self._artifact_summary_or_none(artifact),
             }, now)
             self._insert_mail(idea, "claimed", f"你的点子被 {team['name']} 认领了: {current_form}", now)
 
@@ -533,7 +560,7 @@ class GameService:
                 "projectId": idea["id"],
                 "progress": progress,
                 "currentBug": bug,
-                "artifact": self._artifact_summary(artifact),
+                "artifact": self._artifact_summary_or_none(artifact),
             }, now)
 
     def _conversation_tick(self, edition, now):
@@ -883,6 +910,9 @@ class GameService:
         plan = self._artifact_plan(idea["text"], current_form)
         summary = f"{team['name']} 做出的 {plan['label']} 前端原型: {current_form}"
         body = self._artifact_body(idea, team, title, current_form, progress, bug, plan)
+        if body is None:
+            return previous
+        fallback_body = 'data-artifact-status="llm-unavailable"' in body
         if previous is None:
             self.conn.execute(
                 """
@@ -906,8 +936,8 @@ class GameService:
         self._insert_project_commit(
             idea["id"],
             json.loads(team["member_ids_json"])[0],
-            f"发布 demo v{version}",
-            f"更新 {plan['label']} HTML 原型到 {progress}%: {bug}",
+            f"挂载容错界面 v{version}" if fallback_body else f"发布 demo v{version}",
+            f"LLM 生成接口暂不可用,展示容错界面: {bug}" if fallback_body else f"更新 {plan['label']} HTML 原型到 {progress}%: {bug}",
             artifact_id,
             now,
         )
@@ -919,9 +949,10 @@ class GameService:
         ))
         if generated is not None:
             return generated
-        return self._artifact_html(idea, team, title, current_form, progress, bug, plan)
+        return self._fallback_artifact_html(idea, team, title, current_form, progress, bug)
 
     def _artifact_context(self, idea, team, title, current_form, progress, bug, plan):
+        fingerprint = hashlib.sha1(f"{idea['id']}:{idea['text']}:{current_form}".encode("utf-8")).hexdigest()[:8]
         return {
             "task": "artifact",
             "mode": "frontend-html",
@@ -943,16 +974,21 @@ class GameService:
                 "demoKind": plan["kind"],
                 "visualLabel": plan["label"],
                 "url": self._visual_artifact_url(idea["id"]),
+                "ideaFingerprint": fingerprint,
+                "styleTokens": ARTIFACT_STYLE_TOKENS,
             },
             "tasks": self._tasks_for_idea(idea["id"]),
             "commits": self._commits_for_idea(idea["id"]),
             "requirements": [
                 "Return one self-contained HTML document as result.html.",
-                "Make the HTML the actual idea-specific frontend demo, not a wrapper or progress dashboard.",
-                "Use a purpose-built layout, palette, content model, and interaction concept for this exact idea.",
-                "Include data-project-id, data-demo-kind, and data-idea-fingerprint on the main element.",
-                "Do not include a run-demo button, project intro shell, original idea label, or progress dashboard.",
-                "Do not describe fake random bugs; only show product states that belong to the idea.",
+                "Generate a real standalone frontend for the exact submitted idea, not a pitch wrapper or status page.",
+                "Do not use presets, canned demo kinds, topic templates, or generic project-progress shells.",
+                "Use distinct layout, copy, controls, and visual concept derived from this idea.",
+                "Use the provided OKLCH styleTokens from styles.css in the document CSS.",
+                "Include data-project-id on the main element.",
+                "Include data-idea-fingerprint on the main element using artifact.ideaFingerprint.",
+                "Include at least one button with meaningful interaction.",
+                "Do not include progress dashboards, run-demo buttons, original-idea badges, or explanation of the hackathon system.",
             ],
         }
 
@@ -966,10 +1002,11 @@ class GameService:
         lowered = stripped.lower()
         if "<!doctype html" not in lowered or "</html>" not in lowered:
             return None
-        if "data-project-id" not in stripped:
+        if "data-project-id" not in stripped or "data-idea-fingerprint" not in stripped:
             return None
-        blocked_shell_terms = ["运行 demo", "原始 idea", "项目进度", "ai hackathon demo", "猫的照片识别成需求文档", "泡面角"]
-        if any(term in stripped.lower() for term in blocked_shell_terms):
+        if "<button" not in lowered:
+            return None
+        if any(term in lowered for term in BLOCKED_ARTIFACT_TERMS):
             return None
         return stripped
 
@@ -992,6 +1029,9 @@ class GameService:
             "url": self._visual_artifact_url(row["idea_id"]),
             "apiUrl": f"/api/artifact/{row['id']}",
         }
+
+    def _artifact_summary_or_none(self, row):
+        return None if row is None else self._artifact_summary(row)
 
     def _tasks_for_idea(self, idea_id):
         return [
@@ -1037,387 +1077,58 @@ class GameService:
         cleaned = re.sub(r"[^\w\u4e00-\u9fff]+", "", current_form)[:12] or "AI黑客松Demo"
         return f"{cleaned} Demo"
 
-    def _artifact_html(self, idea, team, title, current_form, progress, bug, plan):
-        if plan["kind"] == "cat-match" and "狗" in idea["text"]:
-            return self._dog_route_artifact_html(idea, team, title, current_form, plan)
-        if plan["kind"] == "cat-match":
-            return self._cat_match_artifact_html(idea, team, title, current_form, plan)
-        if plan["kind"] == "workflow-brief":
-            return self._workflow_brief_artifact_html(idea, team, title, current_form, plan)
-        if plan["kind"] == "stage-pitch":
-            return self._stage_pitch_artifact_html(idea, team, title, current_form, plan)
-        return self._market_signal_artifact_html(idea, team, title, current_form, plan)
-
-    def _artifact_fingerprint(self, idea_text, current_form):
-        return hashlib.sha1(f"{idea_text} {current_form}".lower().encode("utf-8")).hexdigest()[:8]
-
-    def _artifact_common_values(self, idea, team, title, current_form, plan):
-        return {
-            "title": html.escape(title),
-            "idea": html.escape(idea["text"]),
-            "form": html.escape(current_form),
-            "team": html.escape(team["name"]),
-            "receipt": html.escape(idea["receipt_no"]),
-            "kind": html.escape(plan["kind"]),
-            "label": html.escape(plan["label"]),
-            "fingerprint": html.escape(self._artifact_fingerprint(idea["text"], current_form)),
-            "accent": html.escape(plan["accent"]),
-            "second": html.escape(plan["second"]),
-            "surface": html.escape(plan["surface"]),
-            "ink": html.escape(plan["ink"]),
-        }
-
-    def _artifact_css_tokens(self, safe):
-        return (
-            f"--accent: {safe['accent']}; "
-            f"--second: {safe['second']}; "
-            f"--surface: {safe['surface']}; "
-            f"--ink: {safe['ink']};"
-        )
-
-    def _cat_match_artifact_html(self, idea, team, title, current_form, plan):
-        safe = self._artifact_common_values(idea, team, title, current_form, plan)
-        return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe['title']}</title>
-  <style>
-    :root {{ color-scheme: light; {self._artifact_css_tokens(safe)} --milk: oklch(98% .025 28); --blush: color-mix(in oklch, var(--accent) 30%, var(--milk)); }}
-    * {{ box-sizing: border-box; }}
-    body {{ margin: 0; min-height: 100vh; color: var(--ink); background: linear-gradient(148deg, var(--milk), var(--surface) 52%, var(--blush)); font-family: Optima, 'Avenir Next', sans-serif; }}
-    .cat-match-app {{ width: min(1160px, calc(100% - 30px)); margin: 0 auto; padding: clamp(20px, 5vw, 58px) 0; }}
-    .cat-salon-{safe['fingerprint']} {{ display: grid; grid-template-columns: minmax(0, .74fr) minmax(320px, .46fr); gap: 24px; align-items: start; }}
-    .cat-intake {{ min-height: 560px; padding: clamp(24px, 5vw, 60px); border: 3px solid var(--ink); border-radius: 28px 28px 10px 28px; background: radial-gradient(circle at 18% 18%, var(--second), transparent 26%), var(--milk); }}
-    .cat-kicker {{ font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }}
-    .cat-intake h1 {{ margin: 18px 0; font-size: clamp(42px, 8vw, 90px); line-height: .88; letter-spacing: 0; }}
-    .cat-intake p {{ font-size: clamp(18px, 2.5vw, 28px); line-height: 1.35; max-width: 720px; text-wrap: pretty; }}
-    .temperament-strip {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 34px; }}
-    .temperament-strip article {{ min-height: 145px; padding: 16px; border: 2px solid var(--ink); border-radius: 18px; background: color-mix(in oklch, var(--accent) 24%, var(--milk)); }}
-    .temperament-strip span {{ display: block; font-size: 13px; font-weight: 900; opacity: .72; }}
-    .temperament-strip strong {{ display: block; margin-top: 8px; font-size: clamp(28px, 4vw, 54px); line-height: .9; }}
-    .cat-match-card {{ padding: 22px; border: 3px solid var(--ink); border-radius: 10px 28px 28px 10px; background: var(--surface); box-shadow: 10px 10px 0 var(--ink); }}
-    .cat-score {{ display: flex; justify-content: space-between; align-items: end; gap: 18px; border-bottom: 2px solid var(--ink); padding-bottom: 16px; }}
-    .cat-score strong {{ font-size: clamp(54px, 9vw, 96px); line-height: .82; }}
-    .cat-ritual {{ list-style: none; padding: 0; margin: 22px 0; display: grid; gap: 12px; }}
-    .cat-ritual li {{ padding: 12px 0; border-bottom: 1px solid color-mix(in oklch, var(--ink) 32%, transparent); }}
-    .cat-actions {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
-    .cat-actions button {{ min-height: 48px; border: 2px solid var(--ink); border-radius: 999px; background: var(--accent); font: inherit; font-weight: 900; cursor: pointer; }}
-    #catOutcome {{ margin-top: 16px; padding: 14px; border: 2px solid var(--ink); border-radius: 16px; background: var(--milk); font-weight: 800; }}
-    @media (max-width: 820px) {{ .cat-salon-{safe['fingerprint']}, .temperament-strip {{ grid-template-columns: 1fr; }} }}
-  </style>
-</head>
-<body>
-  <main class="cat-match-app cat-salon-{safe['fingerprint']}" data-project-id="{idea['id']}" data-receipt-no="{safe['receipt']}" data-demo-kind="{safe['kind']}" data-idea-fingerprint="{safe['fingerprint']}">
-    <section class="cat-intake">
-      <div class="cat-kicker">Cat Match / {safe['team']}</div>
-      <h1>{safe['form']}</h1>
-      <p>{safe['form']} 是一个猫咪低压力相看页面：主人先确认性格、绝育状态和沟通边界，再决定是否发起相看。</p>
-      <div class="temperament-strip">
-        <article><span>今日推荐</span><strong>96%</strong><p>按性格、距离和主人回复习惯排序。</p></article>
-        <article><span>相处节奏</span><strong>慢热</strong><p>先交换近况，再短时间视频相看。</p></article>
-        <article><span>主人确认</span><strong>3项</strong><p>疫苗、绝育、见面环境都必须确认。</p></article>
-      </div>
-    </section>
-    <aside class="cat-match-card">
-      <div class="cat-score"><span>{safe['receipt']}</span><strong>喵缘</strong></div>
-      <ul class="cat-ritual">
-        <li>输入猫咪性格和相看禁忌</li>
-        <li>筛掉过度活跃或距离过远的对象</li>
-        <li>生成给主人看的温和开场白</li>
-        <li>保存喜欢列表和下一次提醒</li>
-      </ul>
-      <div class="cat-actions">
-        <button type="button" data-cat="已喜欢：系统生成一条温和开场白，并把对方放入相看列表。">喜欢</button>
-        <button type="button" data-cat="已跳过：下一张推荐会降低活泼指数并提高距离权重。">跳过</button>
-      </div>
-      <div id="catOutcome">点击喜欢或跳过可以直接更新当前推荐结果。</div>
-    </aside>
-  </main>
-  <script>
-    document.querySelectorAll('button[data-cat]').forEach((button) => {{
-      button.addEventListener('click', () => {{
-        document.getElementById('catOutcome').textContent = button.dataset.cat;
-      }});
-    }});
-  </script>
-</body>
-</html>"""
-
-    def _dog_route_artifact_html(self, idea, team, title, current_form, plan):
-        safe = self._artifact_common_values(idea, team, title, current_form, plan)
-        return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe['title']}</title>
-  <style>
-    :root {{ color-scheme: light; {self._artifact_css_tokens(safe)} --field: oklch(96% .07 145); --path: oklch(89% .11 88); }}
-    * {{ box-sizing: border-box; }}
-    body {{ margin: 0; min-height: 100vh; color: var(--ink); background: linear-gradient(90deg, var(--field), var(--path)); font-family: 'Gill Sans', 'Avenir Next', Verdana, sans-serif; }}
-    .dog-route-app {{ min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }}
-    .route-header-{safe['fingerprint']} {{ padding: clamp(20px, 5vw, 56px); border-bottom: 4px solid var(--ink); background: color-mix(in oklch, var(--accent) 24%, var(--field)); }}
-    .route-header-{safe['fingerprint']} h1 {{ margin: 12px 0 0; font-size: clamp(38px, 8vw, 88px); line-height: .9; letter-spacing: 0; }}
-    .route-board {{ width: min(1180px, calc(100% - 28px)); margin: 0 auto; padding: 24px 0 44px; display: grid; grid-template-columns: 1.1fr .9fr; gap: 24px; }}
-    .route-map {{ min-height: 520px; border: 3px solid var(--ink); border-radius: 8px; background: repeating-linear-gradient(35deg, var(--field), var(--field) 32px, color-mix(in oklch, var(--second) 28%, var(--field)) 33px, color-mix(in oklch, var(--second) 28%, var(--field)) 64px); position: relative; overflow: hidden; }}
-    .route-map::before {{ content: ""; position: absolute; inset: 18% 12%; border: 18px solid var(--accent); border-left-color: transparent; border-radius: 52% 48% 58% 42%; transform: rotate(-11deg); }}
-    .route-pin {{ position: absolute; width: 136px; padding: 12px; border: 2px solid var(--ink); border-radius: 8px; background: oklch(99% .01 90); font-weight: 900; }}
-    .pin-a {{ left: 8%; top: 12%; }} .pin-b {{ right: 10%; top: 44%; }} .pin-c {{ left: 28%; bottom: 10%; }}
-    .dog-itinerary {{ display: grid; gap: 12px; }}
-    .dog-itinerary article {{ padding: 16px; border: 3px solid var(--ink); border-radius: 8px; background: oklch(99% .01 90); }}
-    .dog-itinerary strong {{ display: block; font-size: clamp(26px, 4vw, 48px); line-height: .9; margin-top: 6px; }}
-    .route-actions {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }}
-    .route-actions button {{ border: 2px solid var(--ink); border-radius: 8px; min-height: 48px; background: var(--accent); font: inherit; font-weight: 900; }}
-    #routeResult {{ padding: 14px; border: 2px solid var(--ink); background: var(--path); font-weight: 800; }}
-    @media (max-width: 820px) {{ .route-board, .route-actions {{ grid-template-columns: 1fr; }} }}
-  </style>
-</head>
-<body>
-  <main class="dog-route-app" data-project-id="{idea['id']}" data-receipt-no="{safe['receipt']}" data-demo-kind="{safe['kind']}" data-idea-fingerprint="{safe['fingerprint']}">
-    <header class="route-header-{safe['fingerprint']}"><span>{safe['team']} / Dog Route Match</span><h1>{safe['form']}</h1></header>
-    <section class="route-board">
-      <div class="route-map"><div class="route-pin pin-a">起点 18:30</div><div class="route-pin pin-b">饮水点</div><div class="route-pin pin-c">2.4km 回家</div></div>
-      <div class="dog-itinerary">
-        <article><span>匹配对象</span><strong>运动搭子</strong><p>按体型、活动量、遛弯半径生成推荐。</p></article>
-        <article><span>安全提示</span><strong>牵引确认</strong><p>见面前确认疫苗、牵引和场地规则。</p></article>
-        <article><span>体力匹配</span><strong>中高</strong><p>避免精力差太大的宠物被安排在同一次约见。</p></article>
-        <div class="route-actions"><button data-route="已喜欢：加入今晚 18:30 的公园见面候选。">喜欢</button><button data-route="已换路线：从河边慢跑改成社区短途散步。">换路线</button><button data-route="强度已降低：改成 20 分钟轻松散步。">降强度</button></div>
-        <div id="routeResult">选择一个动作查看犬类约见结果。</div>
-      </div>
-    </section>
-  </main>
-  <script>
-    document.querySelectorAll('button[data-route]').forEach((button) => button.onclick = () => document.getElementById('routeResult').textContent = button.dataset.route);
-  </script>
-</body>
-</html>"""
-
-    def _workflow_brief_artifact_html(self, idea, team, title, current_form, plan):
-        safe = self._artifact_common_values(idea, team, title, current_form, plan)
-        return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe['title']}</title>
-  <style>
-    :root {{ color-scheme: light; {self._artifact_css_tokens(safe)} --sheet: oklch(99% .006 230); --line: color-mix(in oklch, var(--ink) 22%, transparent); }}
-    * {{ box-sizing: border-box; }}
-    body {{ margin: 0; color: var(--ink); background: linear-gradient(180deg, var(--sheet), var(--surface)); font-family: Optima, 'Avenir Next', sans-serif; }}
-    .workflow-brief-app {{ width: min(1220px, calc(100% - 28px)); margin: 0 auto; padding: clamp(20px, 4vw, 46px) 0; }}
-    .briefing-masthead-{safe['fingerprint']} {{ display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: end; padding-bottom: 18px; border-bottom: 4px double var(--ink); }}
-    .briefing-masthead-{safe['fingerprint']} h1 {{ margin: 0; font-size: clamp(34px, 7vw, 78px); line-height: .95; letter-spacing: 0; }}
-    .briefing-columns {{ display: grid; grid-template-columns: .82fr 1.18fr; gap: 20px; margin-top: 22px; }}
-    .transcript-card, .decision-ledger {{ border: 2px solid var(--ink); background: var(--sheet); }}
-    .transcript-card {{ padding: 18px; display: grid; gap: 16px; }}
-    .summary-slice {{ padding: 14px; background: color-mix(in oklch, var(--accent) 18%, var(--sheet)); border-left: 8px solid var(--accent); }}
-    .decision-ledger table {{ width: 100%; border-collapse: collapse; }}
-    .decision-ledger th, .decision-ledger td {{ padding: 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }}
-    .decision-ledger th {{ background: var(--second); }}
-    .briefing-actions {{ display: flex; flex-wrap: wrap; gap: 10px; padding: 14px; }}
-    .briefing-actions button {{ border: 2px solid var(--ink); background: var(--accent); min-height: 44px; padding: 0 14px; font: inherit; font-weight: 900; }}
-    #briefingResult {{ margin: 0 14px 14px; padding: 14px; background: var(--surface); border: 1px solid var(--line); font-weight: 800; }}
-    @media (max-width: 820px) {{ .briefing-masthead-{safe['fingerprint']}, .briefing-columns {{ grid-template-columns: 1fr; }} }}
-  </style>
-</head>
-<body>
-  <main class="workflow-brief-app" data-project-id="{idea['id']}" data-receipt-no="{safe['receipt']}" data-demo-kind="{safe['kind']}" data-idea-fingerprint="{safe['fingerprint']}">
-    <header class="briefing-masthead-{safe['fingerprint']}"><h1>{safe['form']}</h1><strong>{safe['receipt']}</strong></header>
-    <section class="briefing-columns">
-      <aside class="transcript-card"><div>{safe['team']} / Brief Ops</div><div class="summary-slice">会议进入系统后直接拆成摘要、行动项、负责人和截止时间。</div><p>输入区保留原始会议上下文，右侧输出可执行跟进表。</p></aside>
-      <section class="decision-ledger">
-        <table><thead><tr><th>类型</th><th>内容</th><th>负责人</th></tr></thead><tbody><tr><td>摘要</td><td>压缩成背景、决定、争议三块。</td><td>系统</td></tr><tr><td>行动项</td><td>整理客户问题清单。</td><td>小林</td></tr><tr><td>邮件</td><td>生成下次会议议程和跟进邮件。</td><td>阿倔</td></tr></tbody></table>
-        <div class="briefing-actions"><button data-briefing="行动项已确认：负责人和截止时间已进入跟进队列。">确认行动项</button><button data-briefing="摘要已重写：保留决定，删除重复讨论。">重写摘要</button></div>
-        <div id="briefingResult">行动项等待确认，确认后会进入跟进队列。</div>
-      </section>
-    </section>
-  </main>
-  <script>
-    document.querySelectorAll('button[data-briefing]').forEach((button) => button.onclick = () => document.getElementById('briefingResult').textContent = button.dataset.briefing);
-  </script>
-</body>
-</html>"""
-
-    def _stage_pitch_artifact_html(self, idea, team, title, current_form, plan):
-        safe = self._artifact_common_values(idea, team, title, current_form, plan)
-        return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe['title']}</title>
-  <style>
-    :root {{ color-scheme: light; {self._artifact_css_tokens(safe)} --paper: oklch(98% .012 76); --marker: color-mix(in oklch, var(--accent) 38%, var(--paper)); }}
-    * {{ box-sizing: border-box; }}
-    body {{ margin: 0; min-height: 100vh; color: var(--ink); background: linear-gradient(128deg, var(--paper), var(--surface) 54%, var(--second)); font-family: Georgia, 'Times New Roman', serif; }}
-    .stage-pitch-app {{ min-height: 100vh; display: grid; grid-template-columns: minmax(280px, .42fr) minmax(0, .58fr); }}
-    .pitch-timer {{ padding: clamp(24px, 5vw, 58px); border-right: 4px solid var(--ink); background: var(--ink); color: var(--paper); display: grid; align-content: space-between; gap: 24px; }}
-    .pitch-timer h1 {{ margin: 18px 0; font-size: clamp(40px, 7vw, 92px); line-height: .86; letter-spacing: 0; }}
-    .pitch-clock {{ width: min(260px, 70vw); aspect-ratio: 1; border: 12px solid var(--accent); border-radius: 50%; display: grid; place-items: center; color: var(--paper); font-size: clamp(42px, 8vw, 84px); font-weight: 900; }}
-    .pitch-stage {{ padding: clamp(22px, 5vw, 60px); display: grid; gap: 18px; align-content: start; }}
-    .pitch-script-stack {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
-    .pitch-card {{ min-height: 154px; padding: 18px; border: 3px solid var(--ink); background: var(--paper); box-shadow: 8px 8px 0 var(--ink); }}
-    .pitch-card strong {{ display: block; margin-top: 8px; font-size: clamp(28px, 4vw, 54px); line-height: .92; }}
-    .pitch-evidence-wall {{ display: grid; grid-template-columns: 1.3fr .7fr; gap: 14px; }}
-    .pitch-evidence-wall article {{ padding: 18px; border: 2px solid var(--ink); background: var(--marker); }}
-    .pitch-controls {{ display: flex; flex-wrap: wrap; gap: 10px; }}
-    .pitch-controls button {{ min-height: 48px; border: 2px solid var(--ink); border-radius: 4px; background: var(--accent); color: var(--ink); padding: 0 16px; font: inherit; font-weight: 900; cursor: pointer; }}
-    #pitchCue {{ padding: 16px; border: 2px solid var(--ink); background: var(--paper); font-weight: 800; }}
-    @media (max-width: 860px) {{ .stage-pitch-app, .pitch-script-stack, .pitch-evidence-wall {{ grid-template-columns: 1fr; }} .pitch-timer {{ border-right: 0; border-bottom: 4px solid var(--ink); }} }}
-  </style>
-</head>
-<body>
-  <main class="stage-pitch-app" data-project-id="{idea['id']}" data-receipt-no="{safe['receipt']}" data-demo-kind="{safe['kind']}" data-idea-fingerprint="{safe['fingerprint']}">
-    <aside class="pitch-timer">
-      <div><span>{safe['team']} / Stage Pitch</span><h1>{safe['form']}</h1></div>
-      <div class="pitch-clock">3:00</div>
-      <p>把这个 idea 组织成三分钟路演：开场主张、现场证据、评委追问和收束句。</p>
-    </aside>
-    <section class="pitch-stage">
-      <div class="pitch-script-stack">
-        <article class="pitch-card"><span>开场主张</span><strong>先讲痛点</strong><p>用一句话说明为什么现在需要 {safe['idea']}。</p></article>
-        <article class="pitch-card"><span>现场证据</span><strong>可扫码</strong><p>评委打开链接后直接看到当前 HTML 产物。</p></article>
-      </div>
-      <div class="pitch-evidence-wall">
-        <article><h2>评委追问</h2><p>用户是谁、为什么会用、下一版如何验证。</p></article>
-        <article><h2>收束</h2><p>把问题带回第一次体验。</p></article>
-      </div>
-      <div class="pitch-controls">
-        <button type="button" data-pitch="讲稿切换：现在强调用户第一次看到结果的价值。">下一句讲稿</button>
-        <button type="button" data-pitch="问题已记录：下一版补充用户和成本回答。">记录问题</button>
-      </div>
-      <div id="pitchCue">等待切换讲稿或记录评委问题。</div>
-    </section>
-  </main>
-  <script>
-    document.querySelectorAll('button[data-pitch]').forEach((button) => {{
-      button.addEventListener('click', () => {{
-        document.getElementById('pitchCue').textContent = button.dataset.pitch;
-      }});
-    }});
-  </script>
-</body>
-</html>"""
-
-    def _market_signal_artifact_html(self, idea, team, title, current_form, plan):
-        safe = self._artifact_common_values(idea, team, title, current_form, plan)
-        return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe['title']}</title>
-  <style>
-    :root {{ color-scheme: light; {self._artifact_css_tokens(safe)} --canvas: oklch(97% .018 164); --tile: oklch(99% .006 164); --grid: color-mix(in oklch, var(--ink) 16%, transparent); }}
-    * {{ box-sizing: border-box; }}
-    body {{ margin: 0; min-height: 100vh; color: var(--ink); background: linear-gradient(180deg, var(--canvas), var(--surface)); font-family: 'Gill Sans', 'Avenir Next', Verdana, sans-serif; }}
-    .market-signal-app {{ width: min(1240px, calc(100% - 28px)); margin: 0 auto; padding: clamp(20px, 5vw, 56px) 0; }}
-    .signal-hero {{ display: grid; grid-template-columns: .86fr 1.14fr; gap: 18px; align-items: stretch; }}
-    .signal-promise {{ padding: clamp(22px, 4vw, 52px); border: 3px solid var(--ink); background: radial-gradient(circle at 90% 10%, var(--second), transparent 28%), var(--tile); }}
-    .signal-promise h1 {{ margin: 14px 0; font-size: clamp(38px, 7vw, 86px); line-height: .9; letter-spacing: 0; }}
-    .signal-funnel {{ display: grid; grid-template-rows: repeat(4, minmax(76px, auto)); gap: 10px; }}
-    .signal-step {{ padding: 14px 18px; border: 2px solid var(--ink); background: color-mix(in oklch, var(--accent) 20%, var(--tile)); display: flex; justify-content: space-between; align-items: center; gap: 16px; }}
-    .signal-step:nth-child(2) {{ width: 88%; }}
-    .signal-step:nth-child(3) {{ width: 74%; }}
-    .signal-step:nth-child(4) {{ width: 58%; }}
-    .signal-step strong {{ font-size: clamp(28px, 4vw, 54px); line-height: .9; }}
-    .signal-cohort-grid {{ margin-top: 18px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }}
-    .signal-cohort-grid article {{ min-height: 150px; padding: 16px; border: 2px solid var(--ink); background: var(--tile); }}
-    .signal-actions {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }}
-    .signal-actions button {{ min-height: 48px; border: 2px solid var(--ink); border-radius: 999px; background: var(--accent); font: inherit; font-weight: 900; cursor: pointer; }}
-    #signalResult {{ margin-top: 14px; padding: 16px; border: 2px dashed var(--ink); background: var(--tile); font-weight: 800; }}
-    @media (max-width: 860px) {{ .signal-hero, .signal-cohort-grid, .signal-actions {{ grid-template-columns: 1fr; }} .signal-step, .signal-step:nth-child(2), .signal-step:nth-child(3), .signal-step:nth-child(4) {{ width: 100%; }} }}
-  </style>
-</head>
-<body>
-  <main class="market-signal-app" data-project-id="{idea['id']}" data-receipt-no="{safe['receipt']}" data-demo-kind="{safe['kind']}" data-idea-fingerprint="{safe['fingerprint']}">
-    <section class="signal-hero">
-      <div class="signal-promise">
-        <span>{safe['team']} / Market Signal</span>
-        <h1>{safe['form']}</h1>
-        <p>{safe['idea']} 被做成一个市场验证页：先看谁会点、为什么点、点完留下什么信号。</p>
-      </div>
-      <div class="signal-funnel" aria-label="用户验证漏斗">
-        <div class="signal-step"><span>目标用户</span><strong>早期试用</strong></div>
-        <div class="signal-step"><span>首屏承诺</span><strong>30秒懂</strong></div>
-        <div class="signal-step"><span>试用意愿</span><strong>68</strong></div>
-        <div class="signal-step"><span>留资动作</span><strong>12人</strong></div>
-      </div>
-    </section>
-    <section class="signal-cohort-grid">
-      <article><h2>人群</h2><p>把最愿意尝试的人群放在首屏，并保留一句明确收益。</p></article>
-      <article><h2>证据</h2><p>现场输入模拟第一轮信号，避免只停留在口号。</p></article>
-      <article><h2>下一步</h2><p>用户看完后只需要留下联系方式或选择使用场景。</p></article>
-    </section>
-    <div class="signal-actions">
-      <button type="button" data-signal="信号已刷新：首屏会更强调最直接的用户收益。">刷新信号</button>
-      <button type="button" data-signal="反馈已记录：下一版会把留资入口提前。">记录反馈</button>
-    </div>
-    <div id="signalResult">等待刷新用户信号或记录现场反馈。</div>
-  </main>
-  <script>
-    document.querySelectorAll('button[data-signal]').forEach((button) => {{
-      button.addEventListener('click', () => {{
-        document.getElementById('signalResult').textContent = button.dataset.signal;
-      }});
-    }});
-  </script>
-</body>
-</html>"""
-
     def _artifact_plan(self, idea_text, current_form):
-        text = f"{idea_text} {current_form}".lower()
-        if any(word in text for word in ["猫", "狗", "宠物", "相亲"]):
-            kind = "cat-match"
-        elif any(word in text for word in ["会议", "总结", "日报", "邮件", "文档"]):
-            kind = "workflow-brief"
-        elif any(word in text for word in ["评委", "路演", "舞台", "投票"]):
-            kind = "stage-pitch"
-        else:
-            kinds = ["market-signal", "workflow-brief", "stage-pitch", "cat-match"]
-            digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
-            kind = kinds[int(digest[:2], 16) % len(kinds)]
-        plans = {
-            "cat-match": {
-                "kind": "cat-match",
-                "label": "Pet Match Studio",
-                "accent": "#ff7aa8",
-                "second": "#ffe45e",
-                "surface": "#8cf5d2",
-                "ink": "#2a1831",
-                "layout": ".9fr 1.1fr",
-            },
-            "workflow-brief": {
-                "kind": "workflow-brief",
-                "label": "Brief Ops Console",
-                "accent": "#62d0ff",
-                "second": "#b8ff6a",
-                "surface": "#f4e7ff",
-                "ink": "#16243d",
-                "layout": "1.2fr .8fr",
-            },
-            "stage-pitch": {
-                "kind": "stage-pitch",
-                "label": "Pitch Stage Kit",
-                "accent": "#ffb000",
-                "second": "#ff6a3d",
-                "surface": "#f2f0ff",
-                "ink": "#251600",
-                "layout": "1fr 1fr",
-            },
-            "market-signal": {
-                "kind": "market-signal",
-                "label": "Signal Market Lab",
-                "accent": "#00d084",
-                "second": "#7c5cff",
-                "surface": "#e9fff5",
-                "ink": "#10251c",
-                "layout": ".85fr 1.15fr",
-            },
-        }
-        return plans[kind]
+        return {"kind": "generated-frontend", "label": "AI Generated Frontend"}
+
+    def _fallback_artifact_html(self, idea, team, title, current_form, progress, bug):
+        safe_title = html.escape(title)
+        safe_idea = html.escape(idea["text"])
+        safe_form = html.escape(current_form)
+        safe_team = html.escape(team["name"])
+        safe_receipt = html.escape(idea["receipt_no"])
+        safe_bug = html.escape(bug or "LLM 生成接口暂不可用")
+        progress_value = max(0, min(int(progress), 100))
+        tokens = "; ".join(f"{name}: {value}" for name, value in ARTIFACT_STYLE_TOKENS.items())
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="6">
+  <title>{safe_title} - 生成容错</title>
+  <style>
+    :root {{ color-scheme: light; {tokens}; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; background: var(--bg-obsidian); color: var(--text-primary); font-family: var(--font-family); display: grid; place-items: center; padding: 24px; }}
+    main {{ width: min(880px, 100%); border: 1px solid var(--glass-border); border-radius: 16px; background: var(--bg-card); box-shadow: var(--glass-shadow); padding: clamp(22px, 5vw, 48px); }}
+    .status {{ display: inline-flex; align-items: center; gap: 10px; border: 1px solid var(--glass-border-focus); border-radius: 999px; padding: 8px 12px; color: var(--text-secondary); font-size: 14px; font-weight: 800; }}
+    .dot {{ width: 10px; height: 10px; border-radius: 50%; background: var(--accent-orange); box-shadow: 0 0 18px var(--accent-orange-glow); }}
+    h1 {{ margin: 18px 0 12px; font-size: clamp(34px, 7vw, 72px); line-height: .95; letter-spacing: 0; }}
+    p {{ color: var(--text-secondary); line-height: 1.65; }}
+    .grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 24px; }}
+    .tile {{ min-height: 120px; border: 1px solid var(--glass-border); border-radius: 12px; background: var(--bg-card-hover); padding: 16px; }}
+    .tile span {{ display: block; color: var(--text-muted); font-size: 13px; font-weight: 800; }}
+    .tile strong {{ display: block; margin-top: 8px; font-size: clamp(22px, 4vw, 36px); line-height: 1; }}
+    .progress {{ height: 12px; border-radius: 99px; overflow: hidden; background: oklch(0.24 0.03 75 / .08); margin-top: 24px; }}
+    .bar {{ width: {progress_value}%; height: 100%; background: linear-gradient(90deg, var(--accent-cyan), var(--accent-orange), var(--accent-crimson)); }}
+    @media (max-width: 720px) {{ .grid {{ grid-template-columns: 1fr; }} main {{ border-radius: 12px; }} }}
+  </style>
+</head>
+<body>
+  <main data-artifact-status="llm-unavailable" data-idea-id="{idea['id']}" data-receipt-no="{safe_receipt}">
+    <div class="status"><i class="dot"></i><span>AI 生成接口暂不可用，正在自动重试</span></div>
+    <h1>{safe_idea}</h1>
+    <p>这个地址已经挂载成功，但当前展示的是容错界面，不是最终 demo。多 agent 仍在推进任务和提交记录；当模型 API 恢复并返回合格 HTML 后，本页会自动替换为基于 idea 真实生成的前端。</p>
+    <div class="grid">
+      <div class="tile"><span>当前形态</span><strong>{safe_form}</strong></div>
+      <div class="tile"><span>队伍</span><strong>{safe_team}</strong></div>
+      <div class="tile"><span>状态</span><strong>{progress_value}%</strong></div>
+    </div>
+    <p>{safe_bug}</p>
+    <div class="progress" aria-label="项目进度"><div class="bar"></div></div>
+  </main>
+</body>
+</html>"""
 
     def _idea_progress_html(self, idea, artifact):
         team = self._team_row(idea["team_id"]) if idea["team_id"] else None
