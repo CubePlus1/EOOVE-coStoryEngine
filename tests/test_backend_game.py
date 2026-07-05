@@ -181,6 +181,17 @@ class GameServiceTest(unittest.TestCase):
         row = self.query_one(sql, params)
         return None if row is None else row[0]
 
+    def generated_html(self, idea_id, label):
+        return (
+            "<!doctype html><html><head><style>"
+            ":root{--bg-obsidian:oklch(0.98 0.008 75);"
+            "--accent-cyan:oklch(0.76 0.11 85);}"
+            "body{background:var(--bg-obsidian)}</style></head><body>"
+            f"<main data-project-id=\"{idea_id}\" data-demo-kind=\"generated\" "
+            f"data-idea-fingerprint=\"fp-{label}\">真实生成前端 {label}</main>"
+            "<button type=\"button\">互动</button></body></html>"
+        )
+
     def test_initializes_v4_schema_and_first_edition(self):
         edition = self.query_one("SELECT no, phase FROM editions WHERE id = 1")
 
@@ -252,15 +263,12 @@ class GameServiceTest(unittest.TestCase):
         self.assertNotIn("data-project-id", updated_progress_page["body"])
         self.assertIn("text/html", visual_page["contentType"])
         self.assertIn("给猫做相亲App", visual_page["body"])
-        self.assertIn("data-project-id", visual_page["body"])
-        self.assertIn("demo-stage", visual_page["body"])
-        self.assertIn("idea-chip", visual_page["body"])
-        self.assertIn("linear-gradient", visual_page["body"])
-        self.assertIn("<button", visual_page["body"])
-        self.assertNotIn("完成度", visual_page["body"])
-        self.assertNotIn("项目进度", visual_page["body"])
+        self.assertIn("AI 前端生成中", visual_page["body"])
+        self.assertNotIn("data-project-id", visual_page["body"])
+        self.assertIsNone(self.game.idea(idea["ideaId"])["artifact"])
 
     def test_finished_project_does_not_keep_releasing_artifacts(self):
+        self.llm.results = [{"html": self.generated_html(1, index)} for index in range(20)]
         idea = self.game.submit_idea({"text": "给猫做相亲App"})
         for offset in range(20):
             self.game.tick(now=100 + offset)
@@ -305,6 +313,10 @@ class GameServiceTest(unittest.TestCase):
         self.assertIn("memories", self.llm.contexts[-1]["agents"][0])
 
     def test_tick_builds_project_artifact_tasks_and_commits(self):
+        self.llm.results = [
+            {"html": self.generated_html(1, "claim")},
+            {"html": self.generated_html(1, "advance")},
+        ]
         idea = self.game.submit_idea({"text": "给猫做相亲App", "investorName": "七色"})
 
         self.game.tick(now=100)
@@ -321,14 +333,22 @@ class GameServiceTest(unittest.TestCase):
         self.assertTrue(all(task["ownerAgentId"] for task in project["tasks"]))
         self.assertGreaterEqual(len(project["commits"]), 1)
         self.assertIn("html", artifact["contentType"])
-        self.assertIn("给猫做相亲App", artifact["body"])
-        self.assertIn("demo-stage", artifact["body"])
-        self.assertIn("linear-gradient", artifact["body"])
+        self.assertIn("真实生成前端 advance", artifact["body"])
+        self.assertIn("--bg-obsidian", artifact["body"])
         self.assertIn("<button", artifact["body"])
         self.assertIn("data-project-id", artifact["body"])
+        self.assertIn("data-idea-fingerprint", artifact["body"])
+        self.assertNotIn("demo-stage", artifact["body"])
+        self.assertNotIn("运行 demo", artifact["body"])
         self.assertNotIn("完成度", artifact["body"])
 
-    def test_each_idea_gets_distinct_visual_demo_shape(self):
+    def test_each_idea_mounts_only_its_generated_html(self):
+        self.llm.results = [
+            {"html": self.generated_html(1, "cat-claim")},
+            {"html": self.generated_html(2, "brief-claim")},
+            {"html": self.generated_html(1, "cat-advance")},
+            {"html": self.generated_html(2, "brief-advance")},
+        ]
         first = self.game.submit_idea({"text": "给猫做相亲App"})
         second = self.game.submit_idea({"text": "给会议做总结器"})
 
@@ -337,12 +357,10 @@ class GameServiceTest(unittest.TestCase):
         first_body = self.game.visual_artifact_page(first["ideaId"])["body"]
         second_body = self.game.visual_artifact_page(second["ideaId"])["body"]
 
-        self.assertIn('data-demo-kind="cat-match"', first_body)
-        self.assertIn('data-demo-kind="workflow-brief"', second_body)
-        self.assertIn('class="pet-card"', first_body)
-        self.assertIn('class="brief-card"', second_body)
-        self.assertIn("--accent:", first_body)
-        self.assertIn("--accent:", second_body)
+        self.assertIn("真实生成前端 cat-advance", first_body)
+        self.assertIn("真实生成前端 brief-advance", second_body)
+        self.assertNotIn("demo-stage", first_body)
+        self.assertNotIn("idea-chip", second_body)
         self.assertNotEqual(first_body, second_body)
 
     def test_artifact_generation_asks_llm_for_frontend_html(self):
@@ -350,13 +368,15 @@ class GameServiceTest(unittest.TestCase):
             {
                 "html": (
                     "<!doctype html><html><body><main data-project-id=\"1\" "
-                    "data-demo-kind=\"llm-v1\">LLM artifact v1</main><button>Run</button></body></html>"
+                    "data-demo-kind=\"llm-v1\" data-idea-fingerprint=\"abc123ef\">"
+                    "LLM artifact v1</main><button>Run</button></body></html>"
                 )
             },
             {
                 "html": (
                     "<!doctype html><html><body><main data-project-id=\"1\" "
-                    "data-demo-kind=\"llm-v2\">LLM artifact v2</main><button>Run</button></body></html>"
+                    "data-demo-kind=\"llm-v2\" data-idea-fingerprint=\"abc123eg\">"
+                    "LLM artifact v2</main><button>Run</button></body></html>"
                 )
             },
         ]
@@ -369,7 +389,33 @@ class GameServiceTest(unittest.TestCase):
         self.assertTrue(artifact_contexts)
         self.assertEqual(artifact_contexts[0]["idea"]["text"], "给猫做相亲App")
         self.assertGreaterEqual(len(artifact_contexts[0]["tasks"]), 3)
+        self.assertIn("styleTokens", artifact_contexts[0]["artifact"])
+        self.assertIn("--bg-obsidian", artifact_contexts[0]["artifact"]["styleTokens"])
+        self.assertTrue(any("Do not use presets" in item for item in artifact_contexts[0]["requirements"]))
+        self.assertTrue(any("data-idea-fingerprint" in item for item in artifact_contexts[0]["requirements"]))
         self.assertIn("LLM artifact v2", artifact["body"])
+
+    def test_invalid_or_missing_llm_html_does_not_publish_fake_artifact(self):
+        self.llm.results = [
+            None,
+            {
+                "html": (
+                    "<!doctype html><html><body><main data-project-id=\"1\">"
+                    "运行 demo</main><button>Run</button></body></html>"
+                )
+            },
+        ]
+        idea = self.game.submit_idea({"text": "给评委的咖啡做一个评测界面"})
+
+        self.game.tick(now=100)
+        tracked = self.game.idea(idea["ideaId"])
+        visual_page = self.game.visual_artifact_page(idea["ideaId"])["body"]
+
+        self.assertIsNone(tracked["artifact"])
+        self.assertEqual(self.query_value("SELECT COUNT(*) FROM artifacts"), 0)
+        self.assertIn("AI 前端生成中", visual_page)
+        self.assertNotIn("data-project-id", visual_page)
+        self.assertNotIn("运行 demo", visual_page)
 
     def test_unclaimed_idea_gets_first_reaction_within_next_tick(self):
         idea = self.game.submit_idea({"text": "给评委写借口生成器"})
@@ -544,13 +590,7 @@ class HttpContractTest(unittest.TestCase):
         status, project = self.request("GET", f"/api/project/{world['projects'][0]['projectId']}")
         self.assertEqual(status, 200)
         self.assertGreaterEqual(len(project["tasks"]), 3)
-        self.assertEqual(project["artifact"]["url"], f"/artifacts/idea-{idea['ideaId']}.html")
-        self.assertTrue(project["artifact"]["apiUrl"].startswith("/api/artifact/"))
-
-        status, artifact = self.request("GET", project["artifact"]["apiUrl"])
-        self.assertEqual(status, 200)
-        self.assertIn("text/html", artifact["contentType"])
-        self.assertIn("给猫做相亲App", artifact["body"])
+        self.assertIsNone(project["artifact"])
 
         status, content_type, body = self.request_raw("GET", f"/idea/{idea['ideaId']}")
         self.assertEqual(status, 200)
@@ -562,7 +602,8 @@ class HttpContractTest(unittest.TestCase):
         status, content_type, body = self.request_raw("GET", f"/artifacts/idea-{idea['ideaId']}.html")
         self.assertEqual(status, 200)
         self.assertIn("text/html", content_type)
-        self.assertIn("data-project-id", body)
+        self.assertIn("AI 前端生成中", body)
+        self.assertNotIn("data-project-id", body)
 
         status, host = self.request("POST", "/api/host", {"action": "skip_phase", "phase": "pitch"})
         self.assertEqual(status, 200)

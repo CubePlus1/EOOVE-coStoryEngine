@@ -25,6 +25,33 @@ PHASE_DURATIONS = {
 LOCATIONS = ["工位区A", "工位区B", "工位区C", "泡面咖啡角", "天台", "路演台", "评委席"]
 IDEA_REJECTION_MESSAGE = "组委会认为这个点子过于超前,换一个吧"
 SENSITIVE_WORDS = ("毁灭", "杀", "血腥", "色情", "政治", "广告", "全世界")
+ARTIFACT_STYLE_TOKENS = {
+    "--bg-obsidian": "oklch(0.98 0.008 75)",
+    "--bg-card": "oklch(1.0 0.005 75 / 0.8)",
+    "--bg-card-hover": "oklch(1.0 0.005 75 / 0.95)",
+    "--accent-cyan": "oklch(0.76 0.11 85)",
+    "--accent-cyan-glow": "oklch(0.76 0.11 85 / 0.35)",
+    "--accent-crimson": "oklch(0.68 0.18 355)",
+    "--accent-crimson-glow": "oklch(0.68 0.18 355 / 0.35)",
+    "--accent-orange": "oklch(0.78 0.13 60)",
+    "--accent-orange-glow": "oklch(0.78 0.13 60 / 0.35)",
+    "--text-primary": "oklch(0.24 0.03 75)",
+    "--text-secondary": "oklch(0.40 0.02 75)",
+    "--text-muted": "oklch(0.60 0.015 75)",
+    "--glass-border": "oklch(0.24 0.03 75 / 0.08)",
+    "--glass-border-focus": "oklch(0.68 0.18 355 / 0.25)",
+    "--glass-shadow": "0 8px 32px 0 oklch(0.24 0.03 75 / 0.08)",
+    "--font-family": "'Outfit', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif",
+}
+BLOCKED_ARTIFACT_TERMS = (
+    "运行 demo",
+    "原始 idea",
+    "项目进度",
+    "ai hackathon demo",
+    "猫的照片识别成需求文档",
+    "demo-stage",
+    "idea-chip",
+)
 
 
 class ApiError(Exception):
@@ -506,7 +533,7 @@ class GameService:
                 "teamName": team["name"],
                 "idea": idea["text"],
                 "currentForm": current_form,
-                "artifact": self._artifact_summary(artifact),
+                "artifact": self._artifact_summary_or_none(artifact),
             }, now)
             self._insert_mail(idea, "claimed", f"你的点子被 {team['name']} 认领了: {current_form}", now)
 
@@ -533,7 +560,7 @@ class GameService:
                 "projectId": idea["id"],
                 "progress": progress,
                 "currentBug": bug,
-                "artifact": self._artifact_summary(artifact),
+                "artifact": self._artifact_summary_or_none(artifact),
             }, now)
 
     def _conversation_tick(self, edition, now):
@@ -883,6 +910,8 @@ class GameService:
         plan = self._artifact_plan(idea["text"], current_form)
         summary = f"{team['name']} 做出的 {plan['label']} 前端原型: {current_form}"
         body = self._artifact_body(idea, team, title, current_form, progress, bug, plan)
+        if body is None:
+            return previous
         if previous is None:
             self.conn.execute(
                 """
@@ -919,9 +948,10 @@ class GameService:
         ))
         if generated is not None:
             return generated
-        return self._artifact_html(idea, team, title, current_form, progress, bug, plan)
+        return None
 
     def _artifact_context(self, idea, team, title, current_form, progress, bug, plan):
+        fingerprint = hashlib.sha1(f"{idea['id']}:{idea['text']}:{current_form}".encode("utf-8")).hexdigest()[:8]
         return {
             "task": "artifact",
             "mode": "frontend-html",
@@ -943,15 +973,21 @@ class GameService:
                 "demoKind": plan["kind"],
                 "visualLabel": plan["label"],
                 "url": self._visual_artifact_url(idea["id"]),
+                "ideaFingerprint": fingerprint,
+                "styleTokens": ARTIFACT_STYLE_TOKENS,
             },
             "tasks": self._tasks_for_idea(idea["id"]),
             "commits": self._commits_for_idea(idea["id"]),
             "requirements": [
                 "Return one self-contained HTML document as result.html.",
-                "Use distinct layout and visual concept for this idea.",
+                "Generate a real standalone frontend for the exact submitted idea, not a pitch wrapper or status page.",
+                "Do not use presets, canned demo kinds, topic templates, or generic project-progress shells.",
+                "Use distinct layout, copy, controls, and visual concept derived from this idea.",
+                "Use the provided OKLCH styleTokens from styles.css in the document CSS.",
                 "Include data-project-id on the main element.",
+                "Include data-idea-fingerprint on the main element using artifact.ideaFingerprint.",
                 "Include at least one button with meaningful interaction.",
-                "Do not return a progress dashboard.",
+                "Do not include progress dashboards, run-demo buttons, original-idea badges, or explanation of the hackathon system.",
             ],
         }
 
@@ -965,7 +1001,11 @@ class GameService:
         lowered = stripped.lower()
         if "<!doctype html" not in lowered or "</html>" not in lowered:
             return None
-        if "data-project-id" not in stripped or "<button" not in lowered:
+        if "data-project-id" not in stripped or "data-idea-fingerprint" not in stripped:
+            return None
+        if "<button" not in lowered:
+            return None
+        if any(term in lowered for term in BLOCKED_ARTIFACT_TERMS):
             return None
         return stripped
 
@@ -988,6 +1028,9 @@ class GameService:
             "url": self._visual_artifact_url(row["idea_id"]),
             "apiUrl": f"/api/artifact/{row['id']}",
         }
+
+    def _artifact_summary_or_none(self, row):
+        return None if row is None else self._artifact_summary(row)
 
     def _tasks_for_idea(self, idea_id):
         return [
@@ -1033,189 +1076,8 @@ class GameService:
         cleaned = re.sub(r"[^\w\u4e00-\u9fff]+", "", current_form)[:12] or "AI黑客松Demo"
         return f"{cleaned} Demo"
 
-    def _artifact_html(self, idea, team, title, current_form, progress, bug, plan):
-        safe_title = html.escape(title)
-        safe_idea = html.escape(idea["text"])
-        safe_form = html.escape(current_form)
-        safe_team = html.escape(team["name"])
-        safe_bug = html.escape(bug or "演示数据偶尔会跑偏")
-        safe_receipt = html.escape(idea["receipt_no"])
-        safe_kind = html.escape(plan["kind"])
-        safe_label = html.escape(plan["label"])
-        safe_accent = html.escape(plan["accent"])
-        safe_second = html.escape(plan["second"])
-        safe_surface = html.escape(plan["surface"])
-        safe_ink = html.escape(plan["ink"])
-        safe_layout = html.escape(plan["layout"])
-        safe_tagline = html.escape(self._artifact_tagline(current_form, plan))
-        safe_demo_result = html.escape(self._artifact_demo_result(current_form, plan))
-        widget_html = self._artifact_widget_html(plan, safe_form)
-        return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe_title}</title>
-  <style>
-    :root {{ color-scheme: light; --accent: {safe_accent}; --second: {safe_second}; --surface: {safe_surface}; --ink: {safe_ink}; }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: ui-rounded, 'Avenir Next', 'Trebuchet MS', sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at 12% 12%, var(--second) 0 11rem, transparent 11.2rem),
-        radial-gradient(circle at 88% 18%, var(--accent) 0 9rem, transparent 9.2rem),
-        linear-gradient(135deg, var(--surface) 0%, #fff7d8 44%, var(--second) 100%);
-      min-height: 100vh;
-    }}
-    main {{ width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 32px 0; }}
-    .hero {{ display: grid; grid-template-columns: {safe_layout}; gap: 28px; align-items: stretch; min-height: 520px; }}
-    .brand-panel, .demo-stage {{
-      border: 3px solid var(--ink);
-      border-radius: 22px;
-      background: rgba(255, 252, 238, .92);
-      box-shadow: 10px 10px 0 var(--ink);
-    }}
-    .brand-panel {{ padding: clamp(24px, 5vw, 54px); display: flex; flex-direction: column; justify-content: space-between; }}
-    .idea-chip {{ display: inline-flex; width: fit-content; gap: 8px; align-items: center; padding: 8px 12px; border: 2px solid var(--ink); border-radius: 999px; background: var(--accent); font-weight: 800; }}
-    h1 {{ font-size: clamp(42px, 9vw, 92px); line-height: .9; margin: 30px 0 18px; letter-spacing: 0; }}
-    .tagline {{ font-size: clamp(18px, 3vw, 28px); line-height: 1.25; max-width: 680px; }}
-    .meta-row {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }}
-    .badge {{ padding: 10px 12px; border: 2px solid var(--ink); border-radius: 14px; background: #fff; font-weight: 700; }}
-    .demo-stage {{ padding: 22px; display: grid; grid-template-rows: auto 1fr auto; gap: 18px; background: var(--ink); color: #fffbea; }}
-    .screen {{ min-height: 280px; border: 3px solid #fffbea; border-radius: 18px; padding: 18px; background: linear-gradient(160deg, var(--accent) 0%, var(--second) 48%, var(--surface) 100%); position: relative; overflow: hidden; }}
-    .screen::after {{ content: ""; position: absolute; width: 180px; height: 180px; right: -42px; top: -42px; border: 18px solid rgba(255, 255, 255, .34); border-radius: 50%; }}
-    .screen h2 {{ margin: 0; font-size: 30px; max-width: 320px; }}
-    .result-card {{ position: absolute; left: 18px; right: 18px; bottom: 18px; padding: 16px; border-radius: 16px; background: rgba(255, 251, 234, .95); color: var(--ink); font-weight: 800; }}
-    .pet-card, .brief-card, .market-card, .stage-card {{ position: relative; z-index: 1; display: grid; gap: 10px; width: min(260px, 70%); padding: 14px; border: 3px solid #fffbea; border-radius: 18px; background: rgba(255,255,255,.22); backdrop-filter: blur(2px); }}
-    .pet-card span, .brief-card span, .market-card span, .stage-card span {{ display: inline-block; padding: 7px 9px; border-radius: 999px; background: rgba(255,251,234,.9); color: var(--ink); font-weight: 900; }}
-    label {{ font-weight: 800; }}
-    input {{ width: 100%; margin-top: 8px; padding: 14px; border: 3px solid #fffbea; border-radius: 14px; background: #fffbea; color: #231f20; font: inherit; }}
-    button {{ border: 0; border-radius: 999px; background: var(--accent); color: var(--ink); padding: 14px 18px; font-weight: 900; cursor: pointer; box-shadow: 0 5px 0 #000; }}
-    #result {{ margin-top: 12px; min-height: 50px; line-height: 1.45; }}
-    @media (max-width: 760px) {{ .hero {{ grid-template-columns: 1fr; }} .brand-panel, .demo-stage {{ box-shadow: 6px 6px 0 #231f20; }} }}
-  </style>
-</head>
-<body>
-  <main data-project-id="{idea['id']}" data-receipt-no="{safe_receipt}" data-demo-kind="{safe_kind}">
-    <section class="hero">
-      <div class="brand-panel">
-        <div>
-          <span class="idea-chip">{safe_label}</span>
-          <h1>{safe_title}</h1>
-          <p class="tagline">{safe_tagline}</p>
-        </div>
-        <div class="meta-row">
-          <span class="badge">{safe_team}</span>
-          <span class="badge">{safe_receipt}</span>
-          <span class="badge">原始 idea: {safe_idea}</span>
-        </div>
-      </div>
-      <div class="demo-stage">
-        <div class="screen">
-          <h2>{safe_form}</h2>
-          {widget_html}
-          <div class="result-card" id="showcase">{safe_demo_result}</div>
-        </div>
-        <div>
-          <label for="demo-input">现场输入</label>
-          <input id="demo-input" value="{safe_idea}">
-          <div id="result">当前演示风险: {safe_bug}</div>
-        </div>
-        <button onclick="runDemo()">运行 demo</button>
-      </div>
-    </section>
-  </main>
-  <script>
-    function runDemo() {{
-      const value = document.getElementById('demo-input').value || '{safe_idea}';
-      const message = '已把“' + value + '”转换成可展示结果: {safe_form}。';
-      document.getElementById('showcase').textContent = message;
-      document.getElementById('result').textContent = '演示已刷新,评委现在能看到一个真实前端页面。';
-    }}
-  </script>
-</body>
-</html>"""
-
     def _artifact_plan(self, idea_text, current_form):
-        text = f"{idea_text} {current_form}".lower()
-        if any(word in text for word in ["猫", "狗", "宠物", "相亲"]):
-            kind = "cat-match"
-        elif any(word in text for word in ["会议", "总结", "日报", "邮件", "文档"]):
-            kind = "workflow-brief"
-        elif any(word in text for word in ["评委", "路演", "舞台", "投票"]):
-            kind = "stage-pitch"
-        else:
-            kinds = ["market-signal", "workflow-brief", "stage-pitch", "cat-match"]
-            digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
-            kind = kinds[int(digest[:2], 16) % len(kinds)]
-        plans = {
-            "cat-match": {
-                "kind": "cat-match",
-                "label": "Pet Match Studio",
-                "accent": "#ff7aa8",
-                "second": "#ffe45e",
-                "surface": "#8cf5d2",
-                "ink": "#2a1831",
-                "layout": ".9fr 1.1fr",
-            },
-            "workflow-brief": {
-                "kind": "workflow-brief",
-                "label": "Brief Ops Console",
-                "accent": "#62d0ff",
-                "second": "#b8ff6a",
-                "surface": "#f4e7ff",
-                "ink": "#16243d",
-                "layout": "1.2fr .8fr",
-            },
-            "stage-pitch": {
-                "kind": "stage-pitch",
-                "label": "Pitch Stage Kit",
-                "accent": "#ffb000",
-                "second": "#ff6a3d",
-                "surface": "#f2f0ff",
-                "ink": "#251600",
-                "layout": "1fr 1fr",
-            },
-            "market-signal": {
-                "kind": "market-signal",
-                "label": "Signal Market Lab",
-                "accent": "#00d084",
-                "second": "#7c5cff",
-                "surface": "#e9fff5",
-                "ink": "#10251c",
-                "layout": ".85fr 1.15fr",
-            },
-        }
-        return plans[kind]
-
-    def _artifact_widget_html(self, plan, safe_form):
-        if plan["kind"] == "cat-match":
-            return f'<div class="pet-card"><span>喵缘指数 92</span><strong>{safe_form}</strong><span>今晚推荐 3 只搭子</span></div>'
-        if plan["kind"] == "workflow-brief":
-            return f'<div class="brief-card"><span>摘要</span><strong>{safe_form}</strong><span>行动项 4 / 风险 1</span></div>'
-        if plan["kind"] == "stage-pitch":
-            return f'<div class="stage-card"><span>路演计时 03:00</span><strong>{safe_form}</strong><span>评委问题预案已生成</span></div>'
-        return f'<div class="market-card"><span>热度 +37%</span><strong>{safe_form}</strong><span>首批用户画像已锁定</span></div>'
-
-    def _artifact_tagline(self, current_form, plan):
-        if plan["kind"] == "cat-match":
-            return f"把“{current_form}”做成宠物社交入口: 先给用户一张能扫码体验的匹配卡。"
-        if plan["kind"] == "workflow-brief":
-            return f"把“{current_form}”做成工作流控制台: 自动提炼摘要、行动项和下一步。"
-        if plan["kind"] == "stage-pitch":
-            return f"把“{current_form}”包装成路演舞台工具: 一屏展示卖点、风险和评委问答。"
-        return f"把“{current_form}”做成市场信号页: 让评委直接看到用户、指标和转化假设。"
-
-    def _artifact_demo_result(self, current_form, plan):
-        if plan["kind"] == "cat-match":
-            return f"核心展示: {current_form} 正在生成推荐理由、匹配标签和聊天开场。"
-        if plan["kind"] == "workflow-brief":
-            return f"核心展示: {current_form} 已整理出摘要、待办、负责人和截止时间。"
-        if plan["kind"] == "stage-pitch":
-            return f"核心展示: {current_form} 已切成舞台讲稿、评委问题和获奖话术。"
-        return f"核心展示: {current_form} 已映射出用户分群、需求强度和首屏卖点。"
+        return {"kind": "generated-frontend", "label": "AI Generated Frontend"}
 
     def _idea_progress_html(self, idea, artifact):
         team = self._team_row(idea["team_id"]) if idea["team_id"] else None

@@ -68,19 +68,21 @@ Audience flow:
 2. Receive an idea id and receipt number immediately.
 3. A receipt print ticket is queued.
 4. On the next tick, AI teams claim waiting ideas and split project tasks.
-5. Agents write task outputs and commit logs while updating a real demo
-   artifact.
-6. Each claimed idea gets a self-contained HTML demo URL that can be opened or
-   embedded.
-7. During `pitch` and `awards`, judges review the current artifact; ideas
+5. Agents write task outputs and commit logs while requesting a real generated
+   demo artifact.
+6. Each claimed idea gets a stable visual URL. It shows a waiting page until
+   valid LLM-generated HTML is accepted, then serves that standalone demo.
+7. During `pitch` and `awards`, judges review the current artifact when one is
+   available; ideas
    receive reviews, ranks, certificate print tickets, leaderboard tickets, and
    optional mail notifications.
 
 When `EOOVE_LLM_ENDPOINT` is configured, artifact updates call the LLM with an
 `artifact` task and accept returned self-contained frontend HTML. If the LLM is
-not configured or returns malformed HTML, deterministic fallback still writes
-tasks, commits, distinct per-idea HTML artifacts, conversations, memories,
-intents, project updates, and events.
+not configured or returns malformed HTML, the backend does not publish a fake
+demo. Tasks, commits, conversations, memories, intents, project updates, and
+events still move forward, while `/artifacts/idea-<id>.html` remains a waiting
+page until valid generated HTML is available.
 
 ## API
 
@@ -173,12 +175,11 @@ GET /artifacts/idea-1.html
 ```
 
 This is the frontend HTML produced for the submitted idea. It is a standalone
-HTML demo served by the backend without Node. With an LLM endpoint configured,
-the current artifact can be LLM-generated HTML. Without an LLM endpoint, the
-fallback artifact generator still chooses a different demo shape, palette, and
-interaction pattern per idea. Before a team has produced the first artifact it
-shows a lightweight waiting page; after the first project tick it returns the
-current generated demo HTML.
+HTML demo served by the backend without Node. The backend only publishes this
+artifact after the LLM returns valid self-contained HTML for the exact idea,
+including `data-project-id` and `data-idea-fingerprint`. Without a valid
+artifact, this route shows a lightweight waiting page and never swaps in a
+local preset/template demo.
 
 Receipt and certificate QR codes use:
 
@@ -547,8 +548,9 @@ For conversation weaving, a valid result may include:
 }
 ```
 
-Malformed or missing results fall back to deterministic local dialogue. Project
-tasks, commits, and artifacts are still produced even when there is no LLM.
+Malformed or missing conversation results fall back to deterministic local
+dialogue. Project tasks and commits are still produced even when there is no
+LLM, but visual artifacts are only published from valid generated HTML.
 
 ## Database
 
