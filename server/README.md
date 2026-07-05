@@ -38,7 +38,9 @@ process restarts.
 - `EOOVE_PORT`: HTTP bind port.
 - `EOOVE_DB_PATH`: SQLite path.
 - `EOOVE_STATIC_ROOT`: built frontend directory served for non-API routes.
-- `EOOVE_LLM_ENDPOINT`: optional JSON LLM endpoint.
+- `EOOVE_LLM_ENDPOINT`: optional OpenAI-compatible endpoint. It may be the
+  origin, for example `https://api2.cubeplus1.cn`, or end at `/v1`; the backend
+  automatically posts to `/v1/chat/completions`.
 - `EOOVE_LLM_API_KEY`: optional bearer token for the LLM endpoint.
 - `EOOVE_LLM_MODEL`: defaults to `gpt-5.4-mini`; requests do not send
   `thinking` or `reasoning`.
@@ -533,13 +535,17 @@ When `EOOVE_LLM_ENDPOINT` is configured, the backend posts JSON like:
 ```json
 {
   "model": "gpt-5.4-mini",
-  "task": "weaver",
-  "prompt": "...",
-  "payload": {"task": "conversation", "mode": "economy"}
+  "messages": [
+    {"role": "system", "content": "Task instructions..."},
+    {"role": "user", "content": "{\"task\":\"conversation\",\"payload\":{...}}"}
+  ]
 }
 ```
 
-The backend deliberately does not include `thinking` or `reasoning` fields.
+The backend deliberately does not include `thinking` or `reasoning` fields. It
+parses OpenAI-compatible responses from `choices[0].message.content`; the
+message content must be a JSON object such as `{"html": "..."}` or
+`{"lines": [...]}`.
 
 For conversation weaving, a valid result may include:
 

@@ -69,14 +69,23 @@ class LlmGatewayTest(unittest.TestCase):
         self.assertIsNone(gateway.generate_character("任意角色"))
         self.assertFalse(gateway.configured)
 
-    def test_http_gateway_posts_prompt_payload_and_unwraps_result(self):
+    def test_http_gateway_posts_openai_chat_messages_and_unwraps_json_content(self):
         received = []
+        paths = []
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
+                paths.append(self.path)
                 length = int(self.headers.get("Content-Length", "0"))
-                received.append(json.loads(self.rfile.read(length).decode("utf-8")))
-                body = json.dumps({"result": {"ok": True}}).encode("utf-8")
+                received.append({
+                    "headers": dict(self.headers),
+                    "body": json.loads(self.rfile.read(length).decode("utf-8")),
+                })
+                body = json.dumps({
+                    "choices": [
+                        {"message": {"content": json.dumps({"ok": True})}},
+                    ],
+                }).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -96,10 +105,104 @@ class LlmGatewayTest(unittest.TestCase):
             result = gateway.weave({"task": "conversation"})
 
             self.assertEqual(result, {"ok": True})
-            self.assertEqual(received[0]["task"], "weaver")
-            self.assertEqual(received[0]["model"], "gpt-5.4-mini")
-            self.assertNotIn("thinking", received[0])
-            self.assertNotIn("reasoning", received[0])
+            self.assertEqual(paths, ["/v1/chat/completions"])
+            sent = received[0]["body"]
+            self.assertEqual(sent["model"], "gpt-5.4-mini")
+            self.assertEqual(set(sent), {"model", "messages"})
+            self.assertEqual(sent["messages"][0]["role"], "system")
+            self.assertIn("conversation", sent["messages"][0]["content"])
+            self.assertEqual(sent["messages"][1]["role"], "user")
+            self.assertIn('"task": "conversation"', sent["messages"][1]["content"])
+            self.assertEqual(received[0]["headers"]["User-Agent"], "EOOVE/1.0")
+            self.assertNotIn("thinking", sent)
+            self.assertNotIn("reasoning", sent)
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+
+    def test_http_gateway_appends_chat_completions_when_endpoint_ends_at_v1(self):
+        paths = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                paths.append(self.path)
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                body = json.dumps({
+                    "choices": [
+                        {"message": {"content": "{\"ok\": true}"}},
+                    ],
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            host, port = server.server_address
+            gateway = HttpJsonLlmGateway(endpoint=f"http://{host}:{port}/v1")
+
+            result = gateway.weave({"task": "conversation"})
+
+            self.assertEqual(result, {"ok": True})
+            self.assertEqual(paths, ["/v1/chat/completions"])
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+
+    def test_http_gateway_uses_artifact_instructions_for_artifact_weave(self):
+        received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                received.append(json.loads(self.rfile.read(length).decode("utf-8")))
+                body = json.dumps({
+                    "choices": [
+                        {"message": {"content": json.dumps({
+                            "html": (
+                                "<!doctype html><html><body><main data-project-id=\"1\" "
+                                "data-idea-fingerprint=\"abc\">Demo</main><button>Run</button></body></html>"
+                            )
+                        })}},
+                    ],
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            host, port = server.server_address
+            gateway = HttpJsonLlmGateway(endpoint=f"http://{host}:{port}")
+
+            result = gateway.weave({
+                "task": "artifact",
+                "idea": {"text": "给咖啡杯做情绪天气站"},
+                "requirements": ["Return one self-contained HTML document as result.html."],
+            })
+
+            self.assertIn("html", result)
+            system_content = received[0]["messages"][0]["content"]
+            self.assertIn("frontend HTML", system_content)
+            self.assertIn("self-contained HTML", system_content)
+            self.assertNotIn("对话编织器", system_content)
         finally:
             server.shutdown()
             thread.join(timeout=2)
@@ -114,7 +217,11 @@ class LlmGatewayTest(unittest.TestCase):
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", "0"))
                 received.append(json.loads(self.rfile.read(length).decode("utf-8")))
-                body = json.dumps({"result": {"ok": True}}).encode("utf-8")
+                body = json.dumps({
+                    "choices": [
+                        {"message": {"content": "{\"ok\": true}"}},
+                    ],
+                }).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
