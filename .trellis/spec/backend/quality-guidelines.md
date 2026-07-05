@@ -57,8 +57,10 @@
 - External adapters:
   - LLM gateway methods may remain broad for adapter compatibility, but v4 idea
     moderation is local sensitive-word/length validation.
-  - LLM requests include `model` and default to `gpt-5.4-mini`; do not send
-    `thinking` or `reasoning` fields.
+  - LLM requests target OpenAI-compatible `/v1/chat/completions`. If
+    `EOOVE_LLM_ENDPOINT` is an origin or ends at `/v1`, append the missing path
+    automatically. Requests include `model` and `messages`, default to
+    `gpt-5.4-mini`, and do not send `thinking` or `reasoning` fields.
   - Mail transport: `send(message)`.
   - Printer driver: `print_ticket(ticket)`.
 
